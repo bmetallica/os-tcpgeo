@@ -1,0 +1,26 @@
+<form>
+    <field>
+        <id>portcolor.enabled</id>
+        <label>Aktiviert</label>
+        <type>checkbox</type>
+        <help>Port-Farbe aktiv/inaktiv.</help>
+    </field>
+    <field>
+        <id>portcolor.port</id>
+        <label>Port</label>
+        <type>text</type>
+        <help>TCP/UDP Port-Nummer (z.B. 443, 80, 22, 8443).</help>
+    </field>
+    <field>
+        <id>portcolor.color</id>
+        <label>Farbe (Hex)</label>
+        <type>text</type>
+        <help>Hex-Farbcode für den Arc auf dem Globus (z.B. #0000ff für Blau, #ff0000 für Rot, #ffff00 für Gelb).</help>
+    </field>
+    <field>
+        <id>portcolor.label</id>
+        <label>Bezeichnung</label>
+        <type>text</type>
+        <help>Optionale Beschreibung (z.B. HTTPS, HTTP, SSH). Wird in der Legende angezeigt.</help>
+    </field>
+</form>

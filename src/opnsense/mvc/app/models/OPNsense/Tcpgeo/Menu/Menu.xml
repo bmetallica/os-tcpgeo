@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu>
+    <!-- Services → TCPGeo -->
+    <Services>
+        <Tcpgeo VisibleName="TCPGeo" cssClass="fa fa-globe" url="/ui/tcpgeo" order="99">
+            <Settings VisibleName="Einstellungen" url="/ui/tcpgeo" order="0"/>
+        </Tcpgeo>
+    </Services>
+</menu>

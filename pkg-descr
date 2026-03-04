@@ -1,0 +1,5 @@
+TCPGeo - Live Traffic Globe Visualization
+
+Visualizes network traffic in real-time on an interactive 3D globe.
+Captures packets via tcpdump, resolves IPs using GeoIP, and displays
+directional arcs with port-based color coding.

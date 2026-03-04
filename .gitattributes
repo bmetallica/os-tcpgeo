@@ -1,0 +1,6 @@
+# Force LF line endings for all text files (FreeBSD/OPNsense target)
+* text=auto eol=lf
+
+# Binary files
+*.jpg binary
+*.mmdb binary

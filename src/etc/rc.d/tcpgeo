@@ -1,0 +1,123 @@
+#!/bin/sh
+#
+# PROVIDE: tcpgeo
+# REQUIRE: DAEMON LOGIN
+# KEYWORD: shutdown
+#
+# TCPGeo service script for OPNsense (FreeBSD rc.d)
+# Runs the Python 3 aiohttp server as a daemon.
+#
+# Add the following to /etc/rc.conf or use sysrc:
+#   tcpgeo_enable="YES"
+#
+
+. /etc/rc.subr
+
+name="tcpgeo"
+rcvar="${name}_enable"
+
+load_rc_config $name
+
+: ${tcpgeo_enable:="NO"}
+: ${tcpgeo_pidfile:="/var/run/${name}.pid"}
+: ${tcpgeo_logfile:="/var/log/${name}.log"}
+: ${tcpgeo_dir:="/usr/local/opnsense/scripts/tcpgeo"}
+: ${tcpgeo_user:="nobody"}
+
+pidfile="${tcpgeo_pidfile}"
+
+start_cmd="tcpgeo_start"
+stop_cmd="tcpgeo_stop"
+status_cmd="tcpgeo_status"
+
+tcpgeo_start()
+{
+    if tcpgeo_running; then
+        echo "${name} is already running."
+        return 0
+    fi
+
+    # Clean stale PID file
+    rm -f "${pidfile}"
+
+    # Generate config from OPNsense model
+    if [ -f "${tcpgeo_dir}/generate_config.py" ]; then
+        /usr/local/bin/python3 "${tcpgeo_dir}/generate_config.py" || true
+    fi
+
+    # Ensure log file exists
+    touch "${tcpgeo_logfile}"
+
+    # Ensure log file is writable by service user
+    chown ${tcpgeo_user} "${tcpgeo_logfile}" 2>/dev/null || true
+
+    echo "Starting ${name}."
+    /usr/sbin/daemon -f -u ${tcpgeo_user} -o "${tcpgeo_logfile}" \
+        /usr/local/bin/python3 ${tcpgeo_dir}/server.py
+
+    # Wait briefly for python to start, then find its PID
+    sleep 1
+    _pid=$(pgrep -f "python3.*tcpgeo/server.py" | head -1)
+    if [ -n "${_pid}" ]; then
+        echo "${_pid}" > "${pidfile}"
+        echo "${name} started (pid ${_pid})."
+    else
+        echo "${name} failed to start. Check ${tcpgeo_logfile}"
+        return 1
+    fi
+}
+
+tcpgeo_stop()
+{
+    if [ -f "${pidfile}" ]; then
+        pid=$(cat "${pidfile}")
+        if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
+            echo "Stopping ${name} (pid ${pid})."
+            kill "${pid}" 2>/dev/null
+            count=0
+            while kill -0 "${pid}" 2>/dev/null && [ ${count} -lt 10 ]; do
+                sleep 0.5
+                count=$((count + 1))
+            done
+            if kill -0 "${pid}" 2>/dev/null; then
+                echo "Force killing ${name}."
+                kill -9 "${pid}" 2>/dev/null
+            fi
+        fi
+        rm -f "${pidfile}"
+    fi
+    # Kill any remaining processes
+    pkill -f "python3.*tcpgeo/server.py" 2>/dev/null || true
+    echo "${name} stopped."
+}
+
+tcpgeo_status()
+{
+    if tcpgeo_running; then
+        pid=$(cat "${pidfile}")
+        echo "${name} is running as pid ${pid}."
+        return 0
+    fi
+    echo "${name} is not running."
+    return 1
+}
+
+tcpgeo_running()
+{
+    if [ -f "${pidfile}" ]; then
+        pid=$(cat "${pidfile}")
+        if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    # Fallback: check by process name
+    if pgrep -f "python3.*tcpgeo/server.py" >/dev/null 2>&1; then
+        # Update PID file
+        _pid=$(pgrep -f "python3.*tcpgeo/server.py" | head -1)
+        echo "${_pid}" > "${pidfile}"
+        return 0
+    fi
+    return 1
+}
+
+run_rc_command "$1"

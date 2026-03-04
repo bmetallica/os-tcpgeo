@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<acl>
+    <page-services-tcpgeo>
+        <name>Services: TCPGeo</name>
+        <patterns>
+            <pattern>ui/tcpgeo/*</pattern>
+            <pattern>api/tcpgeo/*</pattern>
+        </patterns>
+    </page-services-tcpgeo>
+</acl>

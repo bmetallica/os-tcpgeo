@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<model>
+    <mount>//OPNsense/tcpgeo</mount>
+    <version>1.0.0</version>
+    <description>TCPGeo Live Traffic Globe Visualization</description>
+    <items>
+        <general>
+            <enabled type="BooleanField">
+                <default>0</default>
+                <Required>Y</Required>
+            </enabled>
+            <listeninterface type="InterfaceField">
+                <Required>Y</Required>
+                <default>lan</default>
+                <Multiple>N</Multiple>
+                <AllowDynamic>Y</AllowDynamic>
+            </listeninterface>
+            <listenport type="IntegerField">
+                <default>3333</default>
+                <MinimumValue>1024</MinimumValue>
+                <MaximumValue>65535</MaximumValue>
+                <Required>Y</Required>
+                <ValidationMessage>Port muss zwischen 1024 und 65535 liegen.</ValidationMessage>
+            </listenport>
+            <captureinterface type="InterfaceField">
+                <Required>Y</Required>
+                <default>wan</default>
+                <Multiple>N</Multiple>
+                <AllowDynamic>Y</AllowDynamic>
+            </captureinterface>
+            <maxmindkey type="TextField">
+                <Required>N</Required>
+                <Mask>/^[a-zA-Z0-9_]*$/</Mask>
+                <ValidationMessage>Nur alphanumerische Zeichen und Unterstriche erlaubt.</ValidationMessage>
+            </maxmindkey>
+            <globepassword type="TextField">
+                <Required>N</Required>
+                <Mask>/^$|^.{8,}$/</Mask>
+                <ValidationMessage>Passwort muss leer (deaktiviert) oder mindestens 8 Zeichen lang sein.</ValidationMessage>
+            </globepassword>
+            <maskips type="BooleanField">
+                <default>1</default>
+                <Required>Y</Required>
+            </maskips>
+        </general>
+        <portcolors>
+            <portcolor type="ArrayField">
+                <enabled type="BooleanField">
+                    <default>1</default>
+                    <Required>Y</Required>
+                </enabled>
+                <port type="IntegerField">
+                    <MinimumValue>1</MinimumValue>
+                    <MaximumValue>65535</MaximumValue>
+                    <Required>Y</Required>
+                    <ValidationMessage>Port muss zwischen 1 und 65535 liegen.</ValidationMessage>
+                </port>
+                <color type="TextField">
+                    <Required>Y</Required>
+                    <default>#00ffff</default>
+                    <Mask>/^#[0-9a-fA-F]{6}$/</Mask>
+                    <ValidationMessage>Farbe muss ein Hex-Code sein (z.B. #00ffff).</ValidationMessage>
+                </color>
+                <label type="TextField">
+                    <Required>N</Required>
+                    <default></default>
+                    <ValidationMessage>Optionale Beschreibung für den Port.</ValidationMessage>
+                </label>
+            </portcolor>
+        </portcolors>
+    </items>
+</model>

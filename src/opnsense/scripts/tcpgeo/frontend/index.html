@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TCPGeo ▸ Live Traffic Globe</title>
+    <link rel="stylesheet" href="/cyberpunk.css">
+
+    <!-- Three.js + Globe.gl (lokal gebündelt) -->
+    <script src="/three.min.js"></script>
+    <script src="/globe.gl.min.js"></script>
+</head>
+<body>
+    <div id="app">
+        <!-- Globe Container -->
+        <div id="globeViz"></div>
+
+        <!-- Title Bar -->
+        <div id="title-bar">
+            <span class="title-text">TCPGEO</span>
+            <span class="title-sub">LIVE TRAFFIC GLOBE</span>
+        </div>
+
+        <!-- Connection Status -->
+        <div id="connection-status">
+            <span id="ws-indicator" class="status-dot"></span>
+            <span id="ws-status">Verbinde...</span>
+        </div>
+
+        <!-- Left HUD: Stats -->
+        <div class="hud-overlay hud-left">
+            <div class="hud-title">&#x25C8; STATISTIK</div>
+            <div class="hud-row">
+                <span class="hud-label">PAKETE</span>
+                <span class="hud-val" id="stat-packets">0</span>
+            </div>
+            <div class="hud-row">
+                <span class="hud-label">LÄNDER</span>
+                <span class="hud-val" id="stat-countries">0</span>
+            </div>
+            <div class="hud-row">
+                <span class="hud-label">ARCS</span>
+                <span class="hud-val live" id="stat-arcs">0</span>
+            </div>
+            <div class="hud-bar"><div class="hud-bar-fill" id="arc-bar" style="width:0%"></div></div>
+        </div>
+
+        <!-- Right HUD: Latest Events -->
+        <div class="hud-overlay hud-right" id="event-hud">
+            <div class="hud-title">&#x25C8; LIVE EVENTS</div>
+            <div id="event-list"></div>
+        </div>
+
+        <!-- Bottom HUD: Port Legend -->
+        <div class="hud-overlay hud-bottom" id="legend-hud">
+            <div class="hud-title">&#x25C8; PORT MAPPING</div>
+            <div id="legend-entries"></div>
+            <div class="legend-direction">
+                <span class="legend-dir-item">&#x2190; Eingehend: Port-Farbe</span>
+                <span class="legend-dir-item">&#x2192; Ausgehend: Multicolor</span>
+            </div>
+        </div>
+    </div>
+
+    <script src="/globe.js"></script>
+</body>
+</html>

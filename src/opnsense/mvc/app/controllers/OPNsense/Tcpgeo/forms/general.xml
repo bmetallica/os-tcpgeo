@@ -1,0 +1,44 @@
+<form>
+    <field>
+        <id>general.enabled</id>
+        <label>TCPGeo aktivieren</label>
+        <type>checkbox</type>
+        <help>Aktiviert oder deaktiviert den TCPGeo Globe-Dienst.</help>
+    </field>
+    <field>
+        <id>general.listeninterface</id>
+        <label>Globus-Schnittstelle</label>
+        <type>dropdown</type>
+        <help>Netzwerk-Schnittstelle auf der der Globus-Webserver erreichbar ist (z.B. LAN).</help>
+    </field>
+    <field>
+        <id>general.listenport</id>
+        <label>Globus-Port</label>
+        <type>text</type>
+        <help>TCP-Port für den Globus-Webserver (z.B. 3333). Muss zwischen 1024 und 65535 liegen.</help>
+    </field>
+    <field>
+        <id>general.captureinterface</id>
+        <label>Capture-Schnittstelle</label>
+        <type>dropdown</type>
+        <help>Netzwerk-Schnittstelle die überwacht wird (z.B. WAN). Hier wird der Traffic per tcpdump mitgelesen.</help>
+    </field>
+    <field>
+        <id>general.maxmindkey</id>
+        <label>MaxMind License Key</label>
+        <type>text</type>
+        <help>Lizenz-Schlüssel für den automatischen Download der GeoLite2 GeoIP-Datenbank. Kostenlos bei maxmind.com registrieren.</help>
+    </field>
+    <field>
+        <id>general.globepassword</id>
+        <label>Globus-Passwort (Username leer lassen)</label>
+        <type>password</type>
+        <help>Optionales Passwort zum Schutz des Globus-Frontends (HTTP Basic Auth). Leer lassen für ungeschützten Zugang.</help>
+    </field>
+    <field>
+        <id>general.maskips</id>
+        <label>IP-Adressen verschleiern</label>
+        <type>checkbox</type>
+        <help>Verschleiert das letzte Oktett der IP-Adressen im Frontend (z.B. 1.2.3.xxx). Standardmäßig aktiviert.</help>
+    </field>
+</form>

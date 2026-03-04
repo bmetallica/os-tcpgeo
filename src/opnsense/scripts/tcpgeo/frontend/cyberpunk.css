@@ -393,3 +393,184 @@ html, body {
   overflow-y: auto;
   contain: layout style paint;
 }
+
+/* ================================================================
+   RESPONSIVE: TABLETS & SMALL DESKTOPS  (<= 900px)
+   Same layout, slightly tighter spacing.
+   ================================================================ */
+@media (max-width: 900px) {
+  .hud-overlay {
+    font-size: 0.65em;
+    padding: 0.5em 0.7em;
+    min-width: 150px;
+  }
+  .event-loc {
+    max-width: 120px;
+  }
+}
+
+/* ================================================================
+   RESPONSIVE: PHONES  (<= 600px)
+   Keep the same left / right / bottom layout as desktop,
+   but scale everything down so panels never overlap.
+   ================================================================ */
+@media (max-width: 600px) {
+
+  /* ---- Title: smaller to not collide with status ---- */
+  #title-bar {
+    top: 4px;
+  }
+  .title-text {
+    font-size: 1em;
+    letter-spacing: 0.15em;
+  }
+  .title-sub {
+    font-size: 0.45em;
+    letter-spacing: 0.2em;
+  }
+
+  /* ---- Connection status: smaller, tuck into title line ---- */
+  #connection-status {
+    top: 6px;
+    right: 6px;
+    font-size: 0.55em;
+    padding: 0.25em 0.5em;
+    gap: 0.3em;
+  }
+  .status-dot {
+    width: 6px;
+    height: 6px;
+  }
+
+  /* ---- All HUDs: smaller font, tighter padding, reduced min-width ---- */
+  .hud-overlay {
+    font-size: 0.52em;
+    padding: 0.4em 0.5em;
+    min-width: 0;
+  }
+
+  .hud-title {
+    font-size: 0.75em;
+    letter-spacing: 0.1em;
+    margin-bottom: 0.3em;
+    padding-bottom: 0.25em;
+  }
+
+  /* ---- Left HUD (Stats): narrow strip ---- */
+  .hud-left {
+    top: 42px;
+    left: 4px;
+    max-width: 38vw;
+  }
+  .hud-row {
+    gap: 0.6em;
+    padding: 0.1em 0;
+    line-height: 1.3;
+  }
+
+  /* ---- Right HUD (Events): narrow strip, limited height ---- */
+  .hud-right {
+    top: 42px;
+    right: 4px;
+    max-width: 52vw;
+  }
+
+  #event-hud {
+    max-height: 35vh;
+  }
+  #event-list {
+    max-height: 25vh;
+  }
+
+  .event-item {
+    gap: 0.3em;
+    padding: 0.15em 0;
+    font-size: 0.85em;
+  }
+  .event-loc {
+    max-width: 70px;
+    font-size: 0.9em;
+  }
+  .event-dot {
+    width: 5px;
+    height: 5px;
+  }
+
+  /* ---- Bottom HUD (Legend): full width, compact ---- */
+  .hud-bottom {
+    bottom: 4px;
+    left: 4px;
+    right: 4px;
+    max-width: none;
+  }
+
+  .legend-direction {
+    gap: 0.6em;
+    font-size: 0.8em;
+  }
+  .legend-dot {
+    width: 7px;
+    height: 7px;
+  }
+  .legend-entry {
+    font-size: 0.85em;
+  }
+}
+
+/* ================================================================
+   RESPONSIVE: VERY NARROW PHONES  (<= 400px)
+   ================================================================ */
+@media (max-width: 400px) {
+  .title-text {
+    font-size: 0.85em;
+    letter-spacing: 0.1em;
+  }
+  .title-sub {
+    font-size: 0.4em;
+  }
+
+  .hud-overlay {
+    font-size: 0.48em;
+    padding: 0.35em 0.4em;
+  }
+
+  .hud-left {
+    max-width: 35vw;
+  }
+  .hud-right {
+    max-width: 55vw;
+  }
+  .event-loc {
+    max-width: 55px;
+  }
+
+  #event-list {
+    max-height: 20vh;
+  }
+
+  .legend-direction {
+    flex-direction: column;
+    gap: 0.2em;
+  }
+}
+
+/* ================================================================
+   RESPONSIVE: LANDSCAPE PHONES (short + narrow)
+   ================================================================ */
+@media (max-height: 500px) and (max-width: 900px) {
+  #title-bar { top: 2px; }
+  .title-text { font-size: 0.85em; }
+  .title-sub { display: none; }
+
+  .hud-overlay {
+    font-size: 0.5em;
+    padding: 0.3em 0.5em;
+  }
+  .hud-left  { top: 30px; }
+  .hud-right { top: 30px; }
+
+  #event-hud { max-height: 40vh; }
+  #event-list { max-height: 25vh; }
+
+  .hud-bottom { bottom: 4px; }
+}

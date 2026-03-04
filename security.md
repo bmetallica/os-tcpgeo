@@ -1,7 +1,7 @@
 # TCPGeo OPNsense Plugin — Sicherheitsanalyse
 
 **Datum:** 2026-03-04  
-**Version:** 1.0.1 (nach vollständigem Security-Hardening)  
+**Version:** 1.0.2 (nach HTTPS/TLS-Erweiterung)  
 **Scope:** Vollständige Analyse aller Projektdateien (Quellcode, Konfiguration, Shell-Skripte, Frontend)
 
 ---
@@ -13,7 +13,7 @@
 | KRITISCH   | 0     | 2       | 2      |
 | HOCH       | 0     | 5       | 5      |
 | MITTEL     | 0     | 8       | 8      |
-| NIEDRIG    | 5     | 0       | 5      |
+| NIEDRIG    | 4     | 1       | 5      |
 | INFO       | 4     | 0       | 4      |
 
 **Gesamtbewertung:** Alle kritischen, hohen und mittleren Schwachstellen wurden behoben. Das Projekt ist vollständig gehärtet. Es verbleiben ausschließlich niedrige Restrisiken und informationelle Hinweise, die keinen unmittelbaren Handlungsbedarf darstellen.
@@ -24,12 +24,12 @@
 
 Keine kritischen, hohen oder mittleren Schwachstellen offen.
 
-### SEC-LOW-01 — Kein HTTPS/TLS 🟡 OFFEN
+### SEC-LOW-01 — Kein HTTPS/TLS ✅ BEHOBEN
 
-- **Datei:** `src/opnsense/scripts/tcpgeo/server.py`
+- **Datei:** `src/opnsense/scripts/tcpgeo/server.py`, `generate_config.py`, `Tcpgeo.xml`
 - **Schweregrad:** NIEDRIG
-- **Beschreibung:** Der Globe-Webserver verwendet ausschließlich unverschlüsseltes HTTP/WS. Passwort (Basic Auth) und Traffic-Daten werden im Klartext übertragen.
-- **Empfehlung:** TLS-Terminierung über HAProxy/nginx auf der OPNsense-Firewall einrichten, oder SSL-Kontext direkt in aiohttp konfigurieren.
+- **Vorher:** Der Globe-Webserver unterstützte ausschließlich unverschlüsseltes HTTP.
+- **Maßnahme:** Optionales HTTPS implementiert. Unterstützt selbstsignierte Zertifikate (automatisch erzeugt via openssl ECC P-256, 10 Jahre, SAN mit Listen-IP) und bestehende OPNsense-Zertifikate (aus config.xml extrahiert). TLS 1.2+ erzwungen. Standard bleibt HTTP.
 
 ### SEC-LOW-02 — PID-File Race Condition 🟡 OFFEN
 

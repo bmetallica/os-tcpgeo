@@ -115,7 +115,7 @@
                     <i class="fa fa-info-circle"></i>
                     <strong>Hinweis:</strong> Der Globus wird auf der gewählten Schnittstelle unter dem angegebenen Port erreichbar sein.
                     Beispiel: Wenn LAN (192.168.1.1) und Port 3333 gewählt werden, ist der Globus unter
-                    <code>http://192.168.1.1:3333</code> erreichbar.
+                    <code>http://192.168.1.1:3333</code> bzw. <code>https://192.168.1.1:3333</code> (bei aktiviertem HTTPS) erreichbar.
                 </div>
                 <div class="alert alert-warning" style="margin-bottom: 10px;">
                     <i class="fa fa-key"></i>

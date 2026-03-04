@@ -9,6 +9,7 @@ Captures traffic locally via tcpdump, resolves GeoIP, streams to globe via WebSo
 import asyncio
 import json
 import os
+import ssl
 import sys
 import logging
 from pathlib import Path
@@ -397,6 +398,25 @@ def main():
     log.info('TCPGeo OPNsense Globe Server')
     log.info('==================================')
 
+    # SSL/TLS setup
+    ssl_context = None
+    if config.get('enableSSL', False):
+        cert_file = config.get('sslCertFile', '')
+        key_file = config.get('sslKeyFile', '')
+        if cert_file and key_file and os.path.exists(cert_file) and os.path.exists(key_file):
+            try:
+                ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
+                ssl_context.load_cert_chain(cert_file, key_file)
+                log.info('SSL/TLS aktiviert: %s', cert_file)
+            except (ssl.SSLError, OSError) as e:
+                log.error('SSL-Fehler: %s — starte ohne SSL', e)
+                ssl_context = None
+        else:
+            log.warning('SSL aktiviert aber Zertifikat nicht gefunden — starte ohne SSL')
+
+    protocol = 'https' if ssl_context else 'http'
+
     # Load GeoIP
     geoip.load()
     log.info('GeoIP bereit: %s', geoip.is_ready())
@@ -411,13 +431,14 @@ def main():
     app = asyncio.get_event_loop().run_until_complete(init_app())
     app.on_shutdown.append(on_shutdown)
 
-    log.info('Globe erreichbar auf http://%s:%d', host, port)
+    log.info('Globe erreichbar auf %s://%s:%d', protocol, host, port)
 
     # run_app handles SIGTERM/SIGINT gracefully on its own
     web.run_app(
         app,
         host=host,
         port=port,
+        ssl_context=ssl_context,
         print=None,
         handle_signals=True
     )

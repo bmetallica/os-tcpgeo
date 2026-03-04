@@ -41,4 +41,22 @@
         <type>checkbox</type>
         <help>Verschleiert das letzte Oktett der IP-Adressen im Frontend (z.B. 1.2.3.xxx). Standardmäßig aktiviert.</help>
     </field>
+    <field>
+        <id>general.enablessl</id>
+        <label>HTTPS aktivieren</label>
+        <type>checkbox</type>
+        <help>Aktiviert HTTPS (TLS) für den Globus-Webserver. Standard ist HTTP. Bei Aktivierung wird der Globus über https:// erreichbar.</help>
+    </field>
+    <field>
+        <id>general.sslmode</id>
+        <label>Zertifikat-Modus</label>
+        <type>dropdown</type>
+        <help>Selbstsigniert: Erzeugt automatisch ein Zertifikat beim Anwenden. OPNsense: Wählt ein vorhandenes Zertifikat aus der Zertifikatsverwaltung (System → Sicherheit → Zertifikate).</help>
+    </field>
+    <field>
+        <id>general.sslcert</id>
+        <label>OPNsense-Zertifikat</label>
+        <type>dropdown</type>
+        <help>Zertifikat aus der OPNsense-Verwaltung. Nur relevant wenn Zertifikat-Modus auf "OPNsense-Zertifikat" steht.</help>
+    </field>
 </form>

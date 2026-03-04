@@ -91,7 +91,11 @@ After installation, open the OPNsense web UI:
 | Listen Port | Port for the globe web server | `3333` |
 | Capture Interface | Interface to capture packets on | WAN |
 | MaxMind License Key | For automatic GeoIP database downloads | `abc123…` || Globe Password | Optional HTTP Basic Auth password (min. 8 chars) | `mySecret1` |
-| Mask IPs | Hide last octet of IPs in frontend (e.g. `1.2.3.xxx`) | ✓ (default) || Port Colors | Color mapping per port (table) | `443 → #00ffff` |
+| Mask IPs | Hide last octet of IPs in frontend (e.g. `1.2.3.xxx`) | ✓ (default) |
+| HTTPS aktivieren | Enable TLS encryption for the globe server | ✗ (default: HTTP) |
+| Zertifikat-Modus | Self-signed (auto-generated) or OPNsense certificate | `Selbstsigniert` |
+| OPNsense-Zertifikat | Select a certificate from System → Trust → Certificates | — |
+| Port Colors | Color mapping per port (table) | `443 → #00ffff` |
 
 Click **Save & Apply** — the service will (re)start automatically.
 
@@ -103,6 +107,12 @@ Open a browser and navigate to:
 
 ```
 http://<YOUR-FIREWALL-IP>:3333
+```
+
+Oder bei aktiviertem HTTPS:
+
+```
+https://<YOUR-FIREWALL-IP>:3333
 ```
 
 Replace `3333` with whatever listen port you configured.
@@ -206,6 +216,7 @@ Das Plugin wurde umfassend gehärtet:
 | GeoIP Integrity | SHA256-Prüfsumme bei jedem Download verifiziert |
 | Input Validation | Interface-Names, Farbcodes, Ports serverseitig validiert |
 | Config Security | `config.json` mit `chmod 640` / `root:nobody` gesichert |
+| TLS/HTTPS | Optionales HTTPS mit selbstsigniertem oder OPNsense-Zertifikat (TLS 1.2+) |
 | Timing-safe Auth | Passwortvergleich via `hmac.compare_digest()` |
 
 Die vollständige Analyse aller 24 Dateien ist in [`security.md`](security.md) dokumentiert.

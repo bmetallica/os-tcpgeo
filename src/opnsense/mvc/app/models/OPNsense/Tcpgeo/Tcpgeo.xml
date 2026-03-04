@@ -42,6 +42,23 @@
                 <default>1</default>
                 <Required>Y</Required>
             </maskips>
+            <enablessl type="BooleanField">
+                <default>0</default>
+                <Required>Y</Required>
+            </enablessl>
+            <sslmode type="OptionField">
+                <Required>N</Required>
+                <default>selfsigned</default>
+                <OptionValues>
+                    <selfsigned>Selbstsigniert (automatisch)</selfsigned>
+                    <opnsense>OPNsense-Zertifikat</opnsense>
+                </OptionValues>
+            </sslmode>
+            <sslcert type="CertificateField">
+                <Required>N</Required>
+                <Type>cert</Type>
+                <ValidationMessage>Bitte ein gültiges Zertifikat auswählen.</ValidationMessage>
+            </sslcert>
         </general>
         <portcolors>
             <portcolor type="ArrayField">

@@ -12,10 +12,15 @@ import json
 import subprocess
 import os
 import sys
+import base64
 
 CONFIG_XML = '/conf/config.xml'
 OUTPUT_DIR = '/usr/local/etc/tcpgeo'
 OUTPUT_JSON = os.path.join(OUTPUT_DIR, 'config.json')
+SSL_CERT_FILE = os.path.join(OUTPUT_DIR, 'server.crt')
+SSL_KEY_FILE = os.path.join(OUTPUT_DIR, 'server.key')
+SELFSIGNED_CERT = os.path.join(OUTPUT_DIR, 'selfsigned.crt')
+SELFSIGNED_KEY = os.path.join(OUTPUT_DIR, 'selfsigned.key')
 
 
 def get_interface_device(config_root, ifname):
@@ -86,6 +91,76 @@ def get_all_interface_ips(device):
     return ips
 
 
+def generate_selfsigned_cert(listen_address):
+    """Generate a self-signed TLS certificate if it doesn't exist yet"""
+    if os.path.exists(SELFSIGNED_CERT) and os.path.exists(SELFSIGNED_KEY):
+        print("[tcpgeo-config] Selbstsigniertes Zertifikat bereits vorhanden")
+        return SELFSIGNED_CERT, SELFSIGNED_KEY
+
+    print("[tcpgeo-config] Erzeuge selbstsigniertes Zertifikat...")
+    subject = f'/CN=TCPGeo Globe/O=OPNsense/OU=TCPGeo'
+    san = f'subjectAltName=IP:{listen_address}'
+    if listen_address not in ('127.0.0.1', '::1'):
+        san += f',IP:127.0.0.1'
+
+    try:
+        subprocess.check_call([
+            '/usr/bin/openssl', 'req',
+            '-x509', '-newkey', 'ec',
+            '-pkeyopt', 'ec_paramgen_curve:prime256v1',
+            '-keyout', SELFSIGNED_KEY,
+            '-out', SELFSIGNED_CERT,
+            '-days', '3650',
+            '-nodes',
+            '-subj', subject,
+            '-addext', san
+        ], timeout=30, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        os.chmod(SELFSIGNED_KEY, 0o640)
+        os.chmod(SELFSIGNED_CERT, 0o644)
+        print("[tcpgeo-config] Selbstsigniertes Zertifikat erzeugt")
+        return SELFSIGNED_CERT, SELFSIGNED_KEY
+    except (subprocess.SubprocessError, OSError) as e:
+        print(f"[tcpgeo-config] Fehler beim Erzeugen des Zertifikats: {e}",
+              file=sys.stderr)
+        return None, None
+
+
+def extract_opnsense_cert(config_root, cert_refid):
+    """Extract certificate and key from OPNsense config.xml by refid"""
+    for cert_el in config_root.findall('cert'):
+        refid = cert_el.findtext('refid', '')
+        if refid == cert_refid:
+            crt_b64 = cert_el.findtext('crt', '')
+            prv_b64 = cert_el.findtext('prv', '')
+            if not crt_b64 or not prv_b64:
+                print(f"[tcpgeo-config] Zertifikat {cert_refid}: crt oder prv leer",
+                      file=sys.stderr)
+                return None, None
+
+            try:
+                crt_pem = base64.b64decode(crt_b64)
+                prv_pem = base64.b64decode(prv_b64)
+            except Exception as e:
+                print(f"[tcpgeo-config] Base64-Decode-Fehler: {e}", file=sys.stderr)
+                return None, None
+
+            with open(SSL_CERT_FILE, 'wb') as f:
+                f.write(crt_pem)
+            with open(SSL_KEY_FILE, 'wb') as f:
+                f.write(prv_pem)
+
+            os.chmod(SSL_KEY_FILE, 0o640)
+            os.chmod(SSL_CERT_FILE, 0o644)
+
+            descr = cert_el.findtext('descr', cert_refid)
+            print(f"[tcpgeo-config] OPNsense-Zertifikat geladen: {descr}")
+            return SSL_CERT_FILE, SSL_KEY_FILE
+
+    print(f"[tcpgeo-config] Zertifikat mit refid '{cert_refid}' nicht gefunden",
+          file=sys.stderr)
+    return None, None
+
+
 def main():
     if not os.path.exists(CONFIG_XML):
         print(f"[tcpgeo-config] Config nicht gefunden: {CONFIG_XML}", file=sys.stderr)
@@ -113,7 +188,10 @@ def main():
             'maxmindKey': '',
             'portColors': {},
             'globePassword': '',
-            'maskIPs': True
+            'maskIPs': True,
+            'enableSSL': False,
+            'sslCertFile': '',
+            'sslKeyFile': ''
         }
     else:
         general = tcpgeo.find('general')
@@ -128,6 +206,9 @@ def main():
         maxmind_key = general.findtext('maxmindkey', '')
         globe_password = general.findtext('globepassword', '')
         mask_ips = general.findtext('maskips', '1') == '1'
+        enable_ssl = general.findtext('enablessl', '0') == '1'
+        ssl_mode = general.findtext('sslmode', 'selfsigned')
+        ssl_cert_ref = general.findtext('sslcert', '')
 
         # Resolve interface names
         listen_device = get_interface_device(root, listen_if)
@@ -175,8 +256,38 @@ def main():
             'maxmindKey': maxmind_key,
             'portColors': port_colors,
             'globePassword': globe_password,
-            'maskIPs': mask_ips
+            'maskIPs': mask_ips,
+            'enableSSL': False,
+            'sslCertFile': '',
+            'sslKeyFile': ''
         }
+
+        # Handle SSL/TLS certificate
+        if enable_ssl:
+            cert_file, key_file = None, None
+            if ssl_mode == 'selfsigned':
+                cert_file, key_file = generate_selfsigned_cert(listen_address)
+            elif ssl_mode == 'opnsense' and ssl_cert_ref:
+                cert_file, key_file = extract_opnsense_cert(root, ssl_cert_ref)
+            else:
+                print("[tcpgeo-config] SSL aktiviert aber kein Zertifikat konfiguriert",
+                      file=sys.stderr)
+
+            if cert_file and key_file:
+                config['enableSSL'] = True
+                config['sslCertFile'] = cert_file
+                config['sslKeyFile'] = key_file
+                # Secure key file for service user
+                try:
+                    import pwd
+                    nobody = pwd.getpwnam('nobody')
+                    os.chown(key_file, 0, nobody.pw_gid)
+                except (KeyError, OSError):
+                    pass
+                print(f"[tcpgeo-config] SSL aktiviert: {cert_file}")
+            else:
+                print("[tcpgeo-config] SSL-Zertifikat nicht verfügbar, starte ohne SSL",
+                      file=sys.stderr)
 
     # Ensure output directory exists
     os.makedirs(OUTPUT_DIR, exist_ok=True)

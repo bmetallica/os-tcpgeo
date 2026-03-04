@@ -1,4 +1,4 @@
-# TCPGeo OPNsense Plugin — Sicherheitsanalyse
+# TCPGeo OPNsense Plugin — Sicherheitsdokumentation
 
 **Datum:** 2026-03-04  
 **Version:** 1.0.2 (nach HTTPS/TLS-Erweiterung)  
@@ -6,7 +6,315 @@
 
 ---
 
-## Zusammenfassung
+## Inhaltsverzeichnis
+
+1. [Sicherheitsstrategie](#1-sicherheitsstrategie)
+2. [Angriffsszenarien & Schutzmaßnahmen](#2-angriffsszenarien--schutzmaßnahmen)
+3. [Deployment-Anforderungen](#3-deployment-anforderungen)
+4. [Version & Support](#4-version--support)
+5. [Schwachstellen-Audit](#5-schwachstellen-audit)
+6. [Datei-für-Datei-Analyse](#6-datei-für-datei-analyse)
+7. [Externe Abhängigkeiten](#7-externe-abhängigkeiten)
+
+---
+
+## 1. Sicherheitsstrategie
+
+### 1.1 Authentifizierung & Autorisierung
+
+Das Plugin hat **zwei getrennte Zugangsebenen**:
+
+| Ebene | Zugang | Authentifizierung | Autorisierung |
+|-------|--------|-------------------|---------------|
+| **OPNsense Web-UI** | Admin-Interface (Port 443) | OPNsense Session + API-Key | ACL `page-services-tcpgeo` |
+| **Globe-Frontend** | Konfigurierbarer Port (z.B. 3333) | Optional: HTTP Basic Auth | Kein Rollenkonzept (View-only) |
+
+**Auth-Flow OPNsense-UI:**
+1. Admin meldet sich an der OPNsense Web-UI an (Session-Cookie)
+2. Alle API-Calls (`/api/tcpgeo/*`) werden durch `ApiControllerBase` geschützt
+3. Mutierende Aktionen (Save, Add, Delete) erfordern POST (CSRF-Schutz durch Framework)
+4. configd-Befehle (start/stop/reconfigure) laufen als Root, abgesichert durch ACL
+
+**Auth-Flow Globe-Frontend:**
+1. Browser öffnet `http(s)://<IP>:3333`
+2. Falls `globePassword` konfiguriert: HTTP 401 → Browser zeigt Basic-Auth-Dialog
+3. Server prüft Passwort via `hmac.compare_digest()` (timing-safe)
+4. WebSocket-Verbindung erbt die Auth-Session (gleicher HTTP-Upgrade-Request)
+5. Kein Login-State — jeder Request wird einzeln geprüft
+
+### 1.2 Netzwerk-Erreichbarkeit
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ Internet / WAN                                                   │
+│                          ✗ NICHT erreichbar                     │
+│                          (Globe bindet auf interne Interfaces)  │
+└──────────────────────────────┬──────────────────────────────────┘
+                               │
+                    ┌──────────▼──────────┐
+                    │   OPNsense Firewall  │
+                    │  ┌────────────────┐  │
+                    │  │ Globe Server   │  │
+                    │  │ :3333 (LAN IP) │  │
+                    │  └────────────────┘  │
+                    └──────────▲──────────┘
+                               │
+┌──────────────────────────────┴──────────────────────────────────┐
+│ LAN / interne Netze                                              │
+│  ✓ Erreichbar auf konfiguriertem Interface + Port               │
+│  ✓ Optional: Basic Auth + HTTPS                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Default-Verhalten:**
+- Der Server bindet auf die **IP des gewählten Listen-Interfaces** (z.B. LAN: 192.168.1.1)
+- Binding auf `0.0.0.0` wird **aktiv blockiert** → Fallback auf `127.0.0.1`
+- Ohne explizite Firewall-Regel ist der Globe-Port nur im LAN erreichbar
+- WAN-Interfaces haben default deny-Regeln auf OPNsense
+
+### 1.3 TLS/HTTPS Policy
+
+| Aspekt | Umsetzung |
+|--------|-----------|
+| **Standard** | HTTP (kein TLS) — für reine LAN-Nutzung ausreichend |
+| **Optionales HTTPS** | Aktivierbar über Checkbox in der UI |
+| **Selbstsigniert** | ECC P-256 Zertifikat, 10 Jahre Gültigkeit, SAN=Listen-IP, automatisch erzeugt |
+| **OPNsense-Cert** | Wählbar aus System → Trust → Certificates (CertificateField) |
+| **Mindest-TLS-Version** | TLS 1.2 (`ssl.TLSVersion.TLSv1_2`) |
+| **Key-Schutz** | `chmod 640`, `chown root:nobody` |
+| **WebSocket** | Automatisch `wss://` wenn HTTPS aktiv (Frontend erkennt `location.protocol`) |
+| **Empfehlung** | HTTPS aktivieren wenn Globe über nicht-vertrauenswürdige Netze erreichbar ist |
+
+---
+
+## 2. Angriffsszenarien & Schutzmaßnahmen
+
+### 2.1 Man-in-the-Middle (MITM)
+
+| Szenario | Angreifer im LAN fängt HTTP-Traffic ab |
+|----------|----------------------------------------|
+| **Risiko** | Basic-Auth-Passwort und Traffic-Daten werden im Klartext übertragen |
+| **Schutz** | ✅ HTTPS aktivierbar (TLS 1.2+, ECC P-256 oder OPNsense-Cert) |
+| **Residual** | Bei HTTP (Standard): Passwort im Klartext. Im LAN typischerweise akzeptabel. |
+| **Empfehlung** | HTTPS aktivieren wenn sensible Daten übertragen werden oder nicht-vertrauenswürdige Clients im Netz sind. |
+
+### 2.2 Cross-Site Scripting (XSS)
+
+| Vektor | Status | Details |
+|--------|--------|---------|
+| **DOM-XSS via innerHTML** | ✅ Eliminiert | `buildPortLegend()` und alle DOM-Operationen verwenden `createElement()`/`textContent` |
+| **Color-Injection** | ✅ Mitigiert | Regex `/^#[0-9a-fA-F]{6}$/` in globe.js und index.volt |
+| **Stored XSS via Config** | ✅ Mitigiert | OPNsense-Model validiert alle Felder serverseitig (Mask, IntegerField, BooleanField) |
+| **Reflected XSS** | ✅ N/A | Kein user-controllable Input wird in HTML reflektiert |
+| **configd-Output in HTML** | 🟡 Gering | `data.response` in index.volt wird unsanitisiert in `<code>` eingefügt. Output stammt von configd (root-controlled), aber bei kompromittiertem Backend potentieller Vektor. |
+
+### 2.3 Cross-Site Request Forgery (CSRF)
+
+| Kontext | Schutz |
+|---------|--------|
+| **OPNsense Web-UI** | ✅ Vollständig geschützt durch Phalcon-Framework (Session + CSRF-Token für POST) |
+| **Globe-Frontend** | ✅ N/A — rein lesend (GET + WebSocket), keine state-changing actions |
+| **Globe-API** | ✅ `/api/config` und `/api/geoip/status` sind GET-only und verändern nichts |
+
+### 2.4 Privilege Escalation
+
+| Vektor | Schutz |
+|--------|--------|
+| **Server-Prozess** | ✅ Läuft als `nobody`, nicht als root |
+| **tcpdump** | ✅ Nur via sudoers-Regel: `nobody ALL=(root) NOPASSWD: /usr/sbin/tcpdump` — kein genereller Root-Zugang |
+| **sudoers-Scope** | ✅ Beschränkt auf exakt `/usr/sbin/tcpdump` — keine Wildcards, keine Parameter-Erweiterung |
+| **Config-Dateien** | ✅ `config.json` ist `640/root:nobody` — nobody kann lesen, nicht schreiben |
+| **configd** | ✅ Läuft als root (OPNsense-Standard), Zugang nur über authentifizierte Admin-API |
+| **Capture.py Injection** | ✅ Device-Name validiert mit `^[a-zA-Z0-9_.]+$` — keine Shell-Injection über Interface-Name |
+
+### 2.5 WebSocket Misuse
+
+| Angriff | Schutz | Details |
+|---------|--------|---------|
+| **Connection Flooding** | ✅ `MAX_WS_CLIENTS = 10` | Max. 10 gleichzeitige WS-Verbindungen insgesamt |
+| **Rapid Reconnects** | ✅ `WS_RATE_LIMIT = 5/min/IP` | Max. 5 Verbindungsversuche pro IP pro Minute |
+| **Zombie Connections** | ✅ `WS_HEARTBEAT = 30s` | Ping/Pong erkennt tote Verbindungen |
+| **Message Flooding (Client→Server)** | ✅ N/A | Server ignoriert alle Client-Nachrichten (`async for msg in ws: pass`) |
+| **Large Payloads (Server→Client)** | ✅ Mitigiert | `MAX_PER_FLUSH = 60`, `MAX_BUFFER = 500` — Backend sampelt bei Überlast |
+| **Auth Bypass** | ✅ Geschützt | WS-Upgrade durchläuft `auth_middleware` (HTTP-Level Auth vor ws.prepare()) |
+| **Memory Exhaustion** | ✅ Mitigiert | Buffer overflow protection: `packet_buffer[:] = packet_buffer[-MAX_PER_FLUSH:]` |
+
+### 2.6 Path Traversal
+
+| Vektor | Schutz |
+|--------|--------|
+| **Statische Dateien** | ✅ `(FRONTEND_DIR / fname).resolve()` + `fpath.is_relative_to(frontend_resolved)` |
+| **`..` Sequenzen** | ✅ Explizit gefiltert: `if fname and '..' not in fname` |
+| **Symlink-Ausbruch** | ✅ `resolve()` folgt Symlinks und `is_relative_to()` prüft das aufgelöste Ziel |
+| **Null-Byte** | ✅ Python 3 Path-Handling ist null-byte-safe |
+
+### 2.7 Denial of Service (DoS)
+
+| Vektor | Schutz |
+|--------|--------|
+| **WS Connection Flood** | ✅ 10 max + Rate-Limit (siehe 2.5) |
+| **HTTP Request Flood** | 🟡 Kein explizites Rate-Limit für HTTP (aiohttp default: keine Begrenzung) |
+| **Packet Buffer Overflow** | ✅ Hard-Cap bei 500, Sampling bei Überlast |
+| **Large File Upload** | ✅ N/A — Server akzeptiert keine POST-Bodys (nur GET + WS) |
+| **Slowloris** | 🟡 aiohttp default-Timeouts greifen, aber kein explizites Limit konfiguriert |
+
+---
+
+## 3. Deployment-Anforderungen
+
+### 3.1 Firewall-Regeln
+
+Der Globe-Server bindet auf das konfigurierte Listen-Interface. **Keine zusätzlichen Firewall-Regeln nötig** solange der Zugriff nur aus dem LAN erfolgt (OPNsense erlaubt LAN→Self-Traffic per Default).
+
+**Falls der Globe aus anderen Netzen erreichbar sein soll:**
+
+```
+Firewall → Rules → [Interface]
+  Action:      Pass
+  Protocol:    TCP
+  Source:      [Gewünschtes Netz / IP]
+  Destination: This Firewall
+  Dest. Port:  3333 (oder konfigurierter Port)
+  Description: TCPGeo Globe Access
+```
+
+**Empfohlene Einschränkungen:**
+- Source auf bekannte Admin-IPs begrenzen
+- Niemals den Globe-Port auf WAN öffnen
+- Bei Bedarf aus entfernten Netzen: VPN verwenden oder Reverse-Proxy mit eigenem TLS
+
+### 3.2 Reverse-Proxy / TLS-Setup
+
+**Option A: Natives HTTPS (empfohlen für einfache Setups)**
+
+In der TCPGeo-UI: *HTTPS aktivieren* → *Selbstsigniert* wählen → *Speichern & Anwenden*.
+Das Zertifikat wird automatisch erzeugt. Bei selbstsignierten Zertifikaten muss der Browser beim ersten Aufruf eine Sicherheitsausnahme bestätigen.
+
+Für ein trusted Zertifikat: In OPNsense unter *System → Trust → Certificates* ein Zertifikat importieren oder per ACME erstellen, dann in TCPGeo unter *Zertifikat-Modus* → *OPNsense-Zertifikat* auswählen.
+
+**Option B: Reverse-Proxy (HAProxy / nginx)**
+
+Falls der Globe hinter einem bestehenden Reverse-Proxy terminiert werden soll:
+
+```nginx
+# nginx-Beispiel (auf OPNsense via os-nginx Plugin)
+server {
+    listen 443 ssl;
+    server_name globe.example.com;
+    ssl_certificate     /path/to/cert.pem;
+    ssl_certificate_key /path/to/key.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:3333;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
+
+Bei dieser Konfiguration:
+- TCPGeo lauscht auf `127.0.0.1:3333` (HTTP, nur lokal erreichbar)
+- TLS-Terminierung erfolgt durch den Reverse-Proxy
+- WebSocket-Upgrade muss korrekt durchgereicht werden (`Upgrade` + `Connection` Header)
+
+**Option C: HAProxy (OPNsense Plugin os-haproxy)**
+
+```
+Backend:  Mode=HTTP, Server=127.0.0.1:3333
+Frontend: Mode=HTTP, Bind=*:443 (SSL Offloading), Default Backend=tcpgeo
+```
+
+### 3.3 sudoers Policy
+
+Die Installation erstellt eine dedizierte sudoers-Datei:
+
+```
+/usr/local/etc/sudoers.d/tcpgeo
+  nobody ALL=(root) NOPASSWD: /usr/sbin/tcpdump
+  Permissions: 440 (root:wheel)
+```
+
+**Sicherheitsbewertung:**
+- ✅ Nur der User `nobody` erhält Zugriff
+- ✅ Nur das Binary `/usr/sbin/tcpdump` ist erlaubt
+- ✅ Keine Wildcards, keine Argumente eingeschränkt (tcpdump benötigt flexible Filterausdrücke)
+- ✅ `NOPASSWD` ist notwendig da der Service non-interaktiv läuft
+- ✅ Datei wird bei Deinstallation entfernt (`uninstall.sh`)
+- 🟡 tcpdump erhält über diese Regel effektiv Root-Capture-Rechte — dies ist designbedingt nötig
+
+**Restrisiko:** Falls ein Angreifer den `nobody`-User kompromittiert (z.B. über eine Schwachstelle in aiohttp), kann er tcpdump mit beliebigen Filtern ausführen und Netzwerkverkehr mitlesen. Dies ist durch die Natur der Anwendung (Packet Capture) unvermeidlich. Die Angriffsfläche ist auf tcpdump beschränkt — kein Shell-Zugang, keine Dateisystem-Schreibrechte.
+
+### 3.4 Dateisystem-Berechtigungen
+
+| Pfad | Owner | Mode | Inhalt |
+|------|-------|------|--------|
+| `/usr/local/etc/tcpgeo/` | `root:nobody` | `750` | Konfigurationsverzeichnis |
+| `/usr/local/etc/tcpgeo/config.json` | `root:nobody` | `640` | Passwort, MaxMind-Key, Einstellungen |
+| `/usr/local/etc/tcpgeo/server.key` | `root:nobody` | `640` | TLS Private Key (falls HTTPS aktiv) |
+| `/usr/local/etc/tcpgeo/server.crt` | `root` | `644` | TLS Zertifikat (öffentlich) |
+| `/usr/local/etc/sudoers.d/tcpgeo` | `root:wheel` | `440` | sudoers-Regel |
+| `/usr/local/opnsense/scripts/tcpgeo/` | `root:wheel` | `755` | Anwendungscode (read-only für nobody) |
+| `/var/log/tcpgeo.log` | `nobody` | `644` | Logdatei |
+| `/var/run/tcpgeo.pid` | `root` | `644` | PID-Datei |
+
+---
+
+## 4. Version & Support
+
+### 4.1 Unterstützte OPNsense-Versionen
+
+| OPNsense | FreeBSD | Python | Status |
+|----------|---------|--------|--------|
+| **25.x** | 14.x | 3.11 | ✅ Vollständig unterstützt (primäre Zielplattform) |
+| **24.x** | 14.x | 3.11 | ✅ Vollständig unterstützt |
+| **23.x** | 13.x | 3.9+ | ✅ Unterstützt (ältere pip-Varianten werden automatisch erkannt) |
+| **22.x** und älter | 13.x | <3.9 | ❌ Nicht unterstützt (`is_relative_to()` erfordert Python ≥ 3.9) |
+
+**Framework-Kompatibilität:**
+- MVC: `ApiControllerBase` / `ApiMutableModelControllerBase` (seit OPNsense 18.x stabil)
+- Model: `CertificateField` (seit OPNsense 21.x verfügbar)
+- configd: Action-Format unverändert seit OPNsense 15.x
+
+### 4.2 Aktualisierungs-Policy
+
+| Komponente | Update-Intervall | Mechanismus |
+|-----------|-----------------|-------------|
+| **GeoIP-Datenbank** | Wöchentlich (So 03:30) | Cron Job via `tcpgeo.inc`, SHA256-verifiziert |
+| **Plugin-Code** | Manuell | `git pull` + `sh install.sh` (überschreibt vorhandene Dateien) |
+| **Python-Abhängigkeiten** | Bei Installation | `pip install -r requirements.txt` |
+| **Frontend-Libraries** | Fest gebündelt | Three.js 0.160.0, Globe.gl 2.32.0 (lokal, kein Auto-Update) |
+| **TLS-Zertifikat (self-signed)** | 10 Jahre Gültigkeit | Wird einmalig erzeugt, nicht automatisch erneuert |
+| **TLS-Zertifikat (OPNsense)** | OPNsense-Verwaltung | Bei Reconfigure aus config.xml aktualisiert |
+
+**Update-Prozess für neue Plugin-Versionen:**
+
+```bash
+cd /tmp
+fetch -o os-tcpgeo.tar.gz https://github.com/bmetallica/os-tcpgeo/archive/refs/heads/main.tar.gz
+tar -xzf os-tcpgeo.tar.gz
+cd os-tcpgeo-main
+sh install.sh
+```
+
+Die Installation überschreibt alle Dateien. Konfigurationseinstellungen in `config.xml` bleiben erhalten. `config.json` wird bei jedem *Speichern & Anwenden* neu generiert.
+
+### 4.3 Sicherheitshinweise für Betreiber
+
+1. **Passwort setzen** — bei Zugriff über nicht-vertrauenswürdige Netze immer Globe-Password konfigurieren
+2. **HTTPS aktivieren** — wenn Basic Auth verwendet wird, da Passwort sonst im Klartext übertragen wird
+3. **Interface einschränken** — Globe nur auf LAN/Management-Interface lauschen lassen, niemals auf WAN
+4. **Firewall-Regeln prüfen** — kein Pass auf WAN für den Globe-Port
+5. **Log überwachen** — `/var/log/tcpgeo.log` regelmäßig prüfen (Rate-Limit-Warnungen, Auth-Fehler)
+6. **GeoIP-Key schützen** — MaxMind License Key nicht teilen, bei Bedarf unter maxmind.com erneuern
+
+---
+
+## 5. Schwachstellen-Audit
+
+### 5.1 Zusammenfassung
 
 | Schweregrad | Offen | Behoben | Gesamt |
 |------------|-------|---------|--------|
@@ -18,11 +326,7 @@
 
 **Gesamtbewertung:** Alle kritischen, hohen und mittleren Schwachstellen wurden behoben. Das Projekt ist vollständig gehärtet. Es verbleiben ausschließlich niedrige Restrisiken und informationelle Hinweise, die keinen unmittelbaren Handlungsbedarf darstellen.
 
----
-
-## 1. Offene Schwachstellen
-
-Keine kritischen, hohen oder mittleren Schwachstellen offen.
+### 5.2 Behobene Schwachstellen (Auswahl)
 
 ### SEC-LOW-01 — Kein HTTPS/TLS ✅ BEHOBEN
 
@@ -30,6 +334,8 @@ Keine kritischen, hohen oder mittleren Schwachstellen offen.
 - **Schweregrad:** NIEDRIG
 - **Vorher:** Der Globe-Webserver unterstützte ausschließlich unverschlüsseltes HTTP.
 - **Maßnahme:** Optionales HTTPS implementiert. Unterstützt selbstsignierte Zertifikate (automatisch erzeugt via openssl ECC P-256, 10 Jahre, SAN mit Listen-IP) und bestehende OPNsense-Zertifikate (aus config.xml extrahiert). TLS 1.2+ erzwungen. Standard bleibt HTTP.
+
+### 5.3 Offene Schwachstellen (NIEDRIG)
 
 ### SEC-LOW-02 — PID-File Race Condition 🟡 OFFEN
 
@@ -75,10 +381,7 @@ Keine kritischen, hohen oder mittleren Schwachstellen offen.
 - **Beschreibung:** Die Deinstallation entfernt den `<OPNsense><tcpgeo>...</tcpgeo></OPNsense>`-Abschnitt aus `/conf/config.xml` nicht. Konfigurationsdaten (inkl. Passwort, MaxMind-Key) bleiben in der Firewall-Config.
 - **Empfehlung:** Optional per `sed` oder XMLStarlet bereinigen, oder klar dokumentieren.
 
----
-
-
-## 2. Informationelle Hinweise
+### 5.4 Informationelle Hinweise
 
 ### SEC-INFO-01 — MaxMind License Key in config.json
 
@@ -102,9 +405,7 @@ Keine kritischen, hohen oder mittleren Schwachstellen offen.
 - **Datei:** `src/opnsense/service/conf/actions.d/actions_tcpgeo.conf`
 - **Beschreibung:** Alle configd-Aktionen (start, stop, reconfigure, download-geoip) laufen als root. Dies ist das Standard-OPNsense-Pattern und wird durch ACL-Regeln geschützt (`ACL.xml`).
 
----
-
-## 3. Architekturübersicht und Angriffsflächen
+### 5.5 Architekturübersicht und Angriffsflächen
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -152,7 +453,7 @@ Keine kritischen, hohen oder mittleren Schwachstellen offen.
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### Angriffsflächen
+**Angriffsflächen:**
 
 | Fläche | Zugang | Schutz |
 |--------|--------|--------|
@@ -166,7 +467,7 @@ Keine kritischen, hohen oder mittleren Schwachstellen offen.
 
 ---
 
-## 4. Datei-für-Datei-Analyse
+## 6. Datei-für-Datei-Analyse
 
 ### server.py (427 Zeilen)
 - **Auth:** ✅ Basic Auth Middleware vorhanden
@@ -274,7 +575,7 @@ Keine kritischen, hohen oder mittleren Schwachstellen offen.
 
 ---
 
-## 5. Empfohlene Prioritäten (verbleibend)
+### 6.1 Empfohlene Prioritäten (verbleibend)
 
 | Priorität | Finding | Aufwand | Status |
 |-----------|---------|--------|--------|
@@ -289,7 +590,7 @@ Keine kritischen, hohen oder mittleren Schwachstellen offen.
 
 ---
 
-## 6. Externe Abhängigkeiten (Vollständig)
+## 7. Externe Abhängigkeiten
 
 | Abhängigkeit | Version | Quelle | Status |
 |-------------|---------|--------|--------|

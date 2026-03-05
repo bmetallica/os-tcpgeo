@@ -10,6 +10,61 @@
         mapDataToFormUI(data_get_map).done(function(data){
             formatTokenizersUI();
             $('.selectpicker').selectpicker('refresh');
+
+            // Geolocation: Button zum Ermitteln der Koordinaten über den Browser
+            var geoBtn = $('<button type="button" class="btn btn-default btn-xs" style="margin-top:5px;">' +
+                '<i class="fa fa-crosshairs"></i> Standort über Browser ermitteln</button>');
+            var geoBtnWrap = $('<div class="form-group">').append(
+                $('<div class="col-md-9 col-md-offset-3">').append(geoBtn).append(
+                    '<span class="help-block" style="font-size:11px;color:#888;">Ermittelt die Koordinaten anhand des Browser-Standorts (GPS/WLAN). ' +
+                    'Funktioniert am besten, wenn Sie sich im selben Netzwerk wie die OPNsense befinden.</span>'
+                )
+            );
+            $('[id="general.locallon"]').closest('.form-group').after(geoBtnWrap);
+
+            geoBtn.on('click', function() {
+                if (!navigator.geolocation) {
+                    BootstrapDialog.show({
+                        type: BootstrapDialog.TYPE_WARNING,
+                        title: 'Standort',
+                        message: 'Geolocation wird von diesem Browser nicht unterstützt.',
+                        buttons: [{ label: 'OK', action: function(d){ d.close(); } }]
+                    });
+                    return;
+                }
+                geoBtn.prop('disabled', true).html('<i class="fa fa-spinner fa-spin"></i> Ermittle...');
+                navigator.geolocation.getCurrentPosition(
+                    function(pos) {
+                        $('[id="general.locallat"]').val(pos.coords.latitude.toFixed(6)).trigger('change');
+                        $('[id="general.locallon"]').val(pos.coords.longitude.toFixed(6)).trigger('change');
+                        geoBtn.prop('disabled', false).html('<i class="fa fa-crosshairs"></i> Standort über Browser ermitteln');
+                        BootstrapDialog.show({
+                            type: BootstrapDialog.TYPE_SUCCESS,
+                            title: 'Standort ermittelt',
+                            message: 'Koordinaten wurden eingetragen:<br/>Breitengrad: ' +
+                                pos.coords.latitude.toFixed(6) + '<br/>Längengrad: ' + pos.coords.longitude.toFixed(6) +
+                                '<br/><br/><small>Bitte mit "Speichern &amp; Anwenden" übernehmen.</small>',
+                            buttons: [{ label: 'OK', action: function(d){ d.close(); } }]
+                        });
+                    },
+                    function(err) {
+                        geoBtn.prop('disabled', false).html('<i class="fa fa-crosshairs"></i> Standort über Browser ermitteln');
+                        var msg = 'Standort konnte nicht ermittelt werden.';
+                        if (err.code === 1) msg += ' Zugriff wurde verweigert.';
+                        else if (err.code === 2) msg += ' Position nicht verfügbar.';
+                        else if (err.code === 3) msg += ' Zeitüberschreitung.';
+                        msg += '<br/><br/>Sie können die Koordinaten auch manuell eingeben. ' +
+                            'Tipp: Koordinaten lassen sich z.B. über eine Karten-Webseite ermitteln.';
+                        BootstrapDialog.show({
+                            type: BootstrapDialog.TYPE_WARNING,
+                            title: 'Standort',
+                            message: msg,
+                            buttons: [{ label: 'OK', action: function(d){ d.close(); } }]
+                        });
+                    },
+                    { enableHighAccuracy: false, timeout: 10000 }
+                );
+            });
         });
 
         // Port-Color Bootgrid

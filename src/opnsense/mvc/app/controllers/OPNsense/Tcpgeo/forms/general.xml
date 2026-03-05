@@ -59,4 +59,20 @@
         <type>dropdown</type>
         <help>Zertifikat aus der OPNsense-Verwaltung. Nur relevant wenn Zertifikat-Modus auf "OPNsense-Zertifikat" steht.</help>
     </field>
+    <field>
+        <type>header</type>
+        <label>Standort der OPNsense</label>
+    </field>
+    <field>
+        <id>general.locallat</id>
+        <label>Breitengrad (Latitude)</label>
+        <type>text</type>
+        <help>Breitengrad des OPNsense-Standorts (-90 bis 90). Wird als Quell-/Zielpunkt für Verbindungslinien auf dem Globus verwendet. Beispiel: 51.3406</help>
+    </field>
+    <field>
+        <id>general.locallon</id>
+        <label>Längengrad (Longitude)</label>
+        <type>text</type>
+        <help>Längengrad des OPNsense-Standorts (-180 bis 180). Wird als Quell-/Zielpunkt für Verbindungslinien auf dem Globus verwendet. Beispiel: 12.3747</help>
+    </field>
 </form>

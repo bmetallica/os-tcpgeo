@@ -210,6 +210,16 @@ def main():
         ssl_mode = general.findtext('sslmode', 'selfsigned')
         ssl_cert_ref = general.findtext('sslcert', '')
 
+        # Local coordinates (OPNsense location)
+        try:
+            local_lat = float(general.findtext('locallat', '50.0'))
+        except (ValueError, TypeError):
+            local_lat = 50.0
+        try:
+            local_lon = float(general.findtext('locallon', '10.0'))
+        except (ValueError, TypeError):
+            local_lon = 10.0
+
         # Resolve interface names
         listen_device = get_interface_device(root, listen_if)
         capture_device = get_interface_device(root, capture_if)
@@ -251,8 +261,8 @@ def main():
             'listenPort': listen_port,
             'captureDevice': capture_device or 'em0',
             'captureIPs': capture_ips,
-            'localLat': 50.0,
-            'localLon': 10.0,
+            'localLat': local_lat,
+            'localLon': local_lon,
             'maxmindKey': maxmind_key,
             'portColors': port_colors,
             'globePassword': globe_password,

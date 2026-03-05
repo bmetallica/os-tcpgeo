@@ -59,6 +59,18 @@
                 <Type>cert</Type>
                 <ValidationMessage>Bitte ein gültiges Zertifikat auswählen.</ValidationMessage>
             </sslcert>
+            <locallat type="TextField">
+                <Required>N</Required>
+                <default>50.0</default>
+                <Mask>/^-?\d{1,3}(\.\d{1,10})?$/</Mask>
+                <ValidationMessage>Breitengrad muss eine gültige Zahl sein (z.B. 51.3406).</ValidationMessage>
+            </locallat>
+            <locallon type="TextField">
+                <Required>N</Required>
+                <default>10.0</default>
+                <Mask>/^-?\d{1,3}(\.\d{1,10})?$/</Mask>
+                <ValidationMessage>Längengrad muss eine gültige Zahl sein (z.B. 12.3747).</ValidationMessage>
+            </locallon>
         </general>
         <portcolors>
             <portcolor type="ArrayField">

@@ -12,16 +12,21 @@ Real-time network traffic visualization on an interactive 3D globe — fully int
 
 - **Cyberpunk 3D Globe** — dark material, neon country borders, animated directional arcs
 - **Live Packet Capture** — SYN-only BPF kernel filter with pfctl byte-count enrichment (~0 % CPU)
+- **Multi-Interface Capture** — separate `tcpdump` per WAN and LAN interface, supports dual-WAN and VLANs
+- **Client Detection** — LAN capture sees pre-NAT traffic → identifies actual client IPs (e.g. `192.168.1.50`)
+- **pfctl Enrichment** — background thread polls kernel state table every 30 s for byte counts and NAT address recovery
+- **Collector (Nacherfassung)** — enrichment automatically creates entries for connections whose SYN was missed (startup race, pre-existing connections)
 - **GeoIP Resolution** — MaxMind GeoLite2-City with automatic weekly database updates (SHA256-verified)
 - **Port-based Arc Colors** — assign a unique color to each port (443 → cyan, 80 → green, …)
 - **Direction Detection** — inbound arcs point toward the firewall, outbound arcs are multicolor
 - **GPU-rendered Labels** — city/country names appear at arc endpoints on the globe
 - **Full OPNsense Integration** — settings page under *Services → TCPGeo*, start/stop/status via configd
 - **High-throughput Optimized** — smart backend sampling, zero-DOM-mutation event feed, separated render loops
+- **MQTT Export** — periodic publish of connection statistics (4 topics, pure-Python MQTT 3.1.1, zero dependencies)
+- **Grafana + InfluxDB Dashboards** — ready-to-import per-client and overview dashboards with Node-RED flow
 - **Single-script Install & Uninstall** — no pkg repo required, just `sh install.sh`
 - **100% Offline** — Three.js, Globe.gl, Fonts und Geodaten lokal gebündelt (keine CDN-Abhängigkeiten)
 - **Security-Hardened** — Privilege Separation (nobody), Basic Auth, WebSocket Rate-Limiting, IP-Masking, XSS-Schutz
-- **MQTT Export** — Periodische Übertragung von Verbindungsdaten an einen MQTT-Broker (Grafana, Home Assistant, InfluxDB). Reiner Python-MQTT-Client ohne externe Abhängigkeiten.
 
 ---
 
@@ -108,46 +113,144 @@ After installation, open the OPNsense web UI:
 
 Click **Save & Apply** — the service will (re)start automatically.
 
-### ConnectionTracker (SYN-only Capture)
+### ConnectionTracker (Multi-Interface SYN Capture)
 
-TCPGeo uses a unified **ConnectionTracker** that combines the best of all worlds:
+TCPGeo uses a unified **ConnectionTracker** that runs one lightweight `tcpdump` per configured interface and enriches connections with byte counts from the kernel state table.
 
 | Property | Value |
 |----------|-------|
 | CPU Load | ~0 % (BPF kernel filter drops 99.9 % of packets before userspace) |
-| Latency | Real-time (new connections appear instantly) |
-| Byte Counts | ✓ via periodic `pfctl -ss -v` enrichment (every 15 s) |
-| Requirements | None — works out of the box |
+| Latency | Real-time (new connections appear on the globe instantly) |
+| Byte Counts | ✓ via periodic `pfctl -ss -v` enrichment (every 30 s) |
+| Client Detection | ✓ LAN capture sees pre-NAT source IPs → real client identification |
+| Requirements | None — works out of the box on any OPNsense system |
 
-**How it works:**
+#### 1. SYN-only BPF kernel filter
 
-1. **SYN-only BPF filter** — `tcpdump` runs with a kernel-level BPF filter that only passes TCP SYN packets (new connections) and selected UDP ports (DNS, QUIC, NTP, STUN, WireGuard). This reduces events from ~10,000/s to ~5–50/s.
-2. **Multi-interface** — separate `tcpdump` processes for each configured WAN and LAN interface. WAN captures show direction; LAN captures reveal pre-NAT client IPs.
-3. **Byte-count enrichment** — a background thread polls `pfctl -ss -v` every 15 s, batching active IPs into a single call and parsing byte counters. The frontend uses these to scale arc thickness.
-4. **UDP dedup** — identical UDP flows (same src/dst/port) are suppressed for 30 s to avoid flooding from DNS bursts.
+Each `tcpdump` instance uses an identical BPF filter compiled into the kernel:
+
+```
+ip and (tcp[tcpflags] & (tcp-syn) != 0 and tcp[tcpflags] & (tcp-ack) = 0)
+     or (udp and (dst port 53 or 443 or 123 or 3478 or 51820))
+     and not broadcast and not multicast
+```
+
+Only TCP SYN packets (first packet of a new connection) and selected UDP traffic (DNS, QUIC/HTTP3, NTP, STUN, WireGuard) pass the filter. This reduces events from ~10,000/s to ~5–50/s with near-zero CPU cost.
+
+#### 2. Multi-interface capture (WAN + LAN)
+
+TCPGeo spawns **separate `tcpdump` processes** for each configured interface. This is the key to both direction detection and client identification:
+
+| Interface role | What it sees | Purpose |
+|----------------|-------------|---------|
+| **WAN** (e.g. `igb0`) | Post-NAT traffic: firewall IP ↔ remote | Incoming connections (remote → firewall) |
+| **LAN** (e.g. `igb1`) | Pre-NAT traffic: client IP → remote | **Outgoing connections with real client IP** |
+
+**Why this matters:** On the WAN interface, all outgoing traffic appears to originate from the firewall's public IP (due to NAT). The LAN interface sees the traffic *before* NAT is applied, so the source IP is the actual client (e.g. `192.168.1.50`). This is what makes per-client analytics, MQTT per-client topics, and Grafana client dashboards possible.
+
+Multiple WAN and LAN interfaces are supported (e.g. dual-WAN, VLANs). Configure them as comma-separated lists in the OPNsense UI.
+
+#### 3. Direction & client detection
+
+For every captured packet, the ConnectionTracker determines direction by comparing both IPs against the known local IP set (all WAN IPs + all LAN IPs + VIPs):
+
+```
+src_ip is local, dst_ip is public  →  outgoing  (client = src_ip)
+src_ip is public, dst_ip is local  →  incoming  (client = dst_ip)
+both local                          →  ignored   (internal traffic)
+```
+
+The `localIP` field in each event contains the real client IP (from LAN capture) or the firewall IP (from WAN capture).
+
+#### 4. pfctl byte-count enrichment
+
+A background thread polls the kernel state table every 30 seconds via `pfctl -ss -v`, piped through `grep` with all known local IPs:
+
+```
+pfctl -ss -v | grep -F -A 1 -e 192.168.1.1 -e 10.0.0.1 -e ...
+```
+
+Both commands run in parallel (C-level pipe), so Python only sees matching states with their byte counters. For each active connection found:
+
+- **Byte counts** (both directions) are extracted from the stats line
+- **NAT translation** is parsed from the parenthesized address in pfctl output (e.g. `(203.0.113.1:12345)`) — this recovers the original client IP even in NAT'd states
+- **Direction** is re-derived from the enriched state
+- The enriched data is emitted as an **update packet** (`update: True`) through the same callback pipeline
+
+These update packets flow to both the **globe frontend** (arc thickness scales with bytes) and the **MQTT publisher** (byte counters in all topics).
+
+#### 5. UDP dedup
+
+Identical UDP flows (same remote IP + destination port) are suppressed for 30 seconds to avoid flooding from DNS bursts. The dedup cache auto-prunes at 5,000 entries.
+
+#### 6. Capture watchdog
+
+An async watchdog checks every 5 seconds whether the capture processes are still running. If a `tcpdump` dies unexpectedly (e.g. interface goes down), it is automatically restarted.
 
 ### Collector (Nacherfassung / Enrichment-based Connection Recovery)
 
-Because TCPGeo relies on SYN packets to detect new connections, there are two edge cases where a connection is **already active** but its SYN was never seen:
+Because TCPGeo relies on SYN packets to detect new connections, there are edge cases where a connection is **already active** but its SYN was never seen:
 
 | Scenario | Cause |
 |----------|-------|
-| **Startup race** | Connections established in the first seconds before `tcpdump` is fully running |
-| **Pre-existing connections** | Long-lived connections that were opened before TCPGeo was installed or started |
+| **Startup race** | Connections established in the first moments before `tcpdump` is fully running |
+| **Pre-existing connections** | Long-lived connections opened before TCPGeo was started |
+| **Interface flap** | SYN captured on an interface that briefly went down, then came back |
 
-The **Collector** solves this automatically — no user action required:
+The **Collector** solves this automatically for both the globe and MQTT — no user action required.
 
-1. The MQTT publisher is started **before** the packet capture, ensuring no SYN is lost to a timing gap.
-2. When the periodic `pfctl -ss -v` enrichment cycle runs (every 15 s), it discovers state-table entries with byte counters for IPs that have no corresponding SYN record in the MQTT aggregation tables.
-3. For each such "orphaned" enrichment update, the Collector **creates a new MQTT aggregation entry** with `count: 1` and the enriched byte count. The connection is resolved (country, city, port) just like any SYN-triggered entry.
-4. Subsequent enrichment cycles update that entry normally (incrementing bytes).
+**How it works:**
 
-**Result:** MQTT statistics are complete even for connections that existed before capture started. The Collector adds at most one entry per active state-table flow — it cannot produce duplicates because the key (client + country + city + port) is checked before creation.
+1. **MQTT before capture** — `start_mqtt()` is called before `start_capture()` in the startup sequence. This ensures the MQTT publisher is ready to receive data before the first SYN arrives.
+2. **pfctl discovers all active connections** — the enrichment cycle (every 30 s) runs `pfctl -ss -v` which returns *all* entries in the kernel state table, including connections whose SYN was never seen by TCPGeo.
+3. **Automatic entry creation** — when an enrichment update arrives for a connection that has no corresponding entry in the MQTT aggregation tables (`_out_stats`, `_out_detail`, `_in_stats`), the Collector creates a new entry with `count: 1` and the current byte count. The connection is GeoIP-resolved (country, city) and port-labeled just like any SYN-triggered entry.
+4. **Normal updates afterwards** — subsequent enrichment cycles update the byte count of the existing entry normally.
+
+This works across all interfaces: a connection seen only in the pfctl state table (which is system-wide) gets properly attributed to the correct client IP through NAT address parsing.
 
 **Impact on data:**
-- Connection counts may be **slightly understated** if multiple SYN-retransmits for the same flow were all missed (still counted as 1).
-- Byte counts are **accurate** because they come from `pfctl` regardless of SYN detection.
-- The Collector only fires during enrichment cycles, so the entry appears with a delay of up to one `ENRICH_INTERVAL` (default 15 s) after the connection was established.
+
+| Aspect | Behavior |
+|--------|----------|
+| Connection counts | May be slightly understated (multiple missed SYNs for the same flow still counted as 1) — conservative by design |
+| Byte counts | **Accurate** — sourced from `pfctl` kernel counters, independent of SYN detection |
+| Latency | Entry appears with up to 30 s delay (one `ENRICH_INTERVAL`) after connection was established |
+| Deduplication | Key-based (`client + country + city + port`) — no duplicate entries possible |
+| Direction | Correctly derived from pfctl state, including NAT translation |
+
+### Data Pipeline
+
+Every connection event flows through a unified pipeline that feeds both the live globe and the MQTT analytics:
+
+```
+  ┌──────────────────────────────────────────────────────────────────┐
+  │                    ConnectionTracker                             │
+  │                                                                  │
+  │  tcpdump (WAN)  ──┐                                             │
+  │  tcpdump (LAN)  ──┼──→  _parse_line()  ──→  on_packet()        │
+  │  tcpdump (OPTx) ──┘     (SYN + UDP)         (new connection)   │
+  │                                                                  │
+  │  pfctl -ss -v ─────→  _poll_byte_counts() ──→  on_packet()     │
+  │  (every 30 s)          (enrichment)            (update=True)    │
+  └─────────────────────────────┬────────────────────────────────────┘
+                                │
+                                ▼
+                        server.py: on_packet()
+                        ├── GeoIP resolve (country, city, lat, lon)
+                        ├── Port label + color lookup
+                        ├── IP masking (if enabled)
+                        │
+                        ├──→  packet_buffer  ──→  flush_packets()  ──→  WebSocket → Globe
+                        │     (SYN always sent, updates sampled)
+                        │
+                        └──→  mqtt_pub.on_packet()
+                              ├── New connection: aggregate into stats tables
+                              └── update=True:
+                                  ├── Update byte counters
+                                  └── Collector: create entry if SYN was missed
+```
+
+Both the globe and MQTT receive the same enriched data. The globe shows real-time arcs; MQTT accumulates statistics for long-term analytics.
 
 ### MQTT Export
 
@@ -203,6 +306,29 @@ TCPGeo can periodically publish connection statistics to an MQTT broker. This en
 - **Node-RED** — Custom alerting workflows
 - **Any MQTT consumer** — statistics, logging, or archival
 
+#### Ready-to-use Integration: Node-RED + InfluxDB + Grafana
+
+This repository includes a complete analytics stack:
+
+| File | Description |
+|------|-------------|
+| [`nodered-flow-influxdb.json`](nodered-flow-influxdb.json) | Node-RED flow: MQTT → InfluxDB 1.6 (7 measurements, empty-tag-safe) |
+| [`grafana-dashboard-client.json`](grafana-dashboard-client.json) | Grafana 12.4: Per-client analysis (10 panels, dropdown selector) |
+| [`grafana-dashboard-overview.json`](grafana-dashboard-overview.json) | Grafana 12.4: All-clients overview (15 panels, 4 sections) |
+
+**Setup:**
+
+1. Import `nodered-flow-influxdb.json` into Node-RED → configure MQTT broker IP and InfluxDB connection
+2. Create InfluxDB database: `CREATE DATABASE tcpgeo`
+3. Import Grafana dashboards → set InfluxDB datasource
+
+The Node-RED flow subscribes to all 4 MQTT topics and writes 7 InfluxDB measurements:
+- `tcpgeo_outgoing_total` / `tcpgeo_outgoing_countries` — per-client outgoing stats
+- `tcpgeo_incoming_total` / `tcpgeo_incoming_countries` — per-port incoming stats
+- `tcpgeo_client_detail` — per-client detailed connections (country, city, port, bytes)
+- `tcpgeo_connections` — recent connection snapshots
+- `tcpgeo_stats_incoming` — per-port incoming detail with country breakdown
+
 **Implementation:** Pure-Python MQTT 3.1.1 client (zero external dependencies). QoS 0, single persistent TCP connection with keepalive. CPU impact: negligible (~0 %).
 
 ---
@@ -243,6 +369,9 @@ os-tcpgeo/
 ├── uninstall.sh                            # Clean removal
 ├── pkg-descr                               # Package description
 ├── Screenshot.jpg                          # Globe screenshot
+├── nodered-flow-influxdb.json              # Node-RED: MQTT → InfluxDB 1.6
+├── grafana-dashboard-client.json           # Grafana: per-client analysis (10 panels)
+├── grafana-dashboard-overview.json         # Grafana: all-clients overview (15 panels)
 └── src/
     ├── etc/
     │   ├── inc/plugins.inc.d/
@@ -264,9 +393,9 @@ os-tcpgeo/
         │   └── views/OPNsense/Tcpgeo/
         │       └── index.volt              # Settings page template
         ├── scripts/tcpgeo/
-        │   ├── server.py                   # Python aiohttp server (HTTP + WS)
-        │   ├── capture.py                  # ConnectionTracker (SYN-only + pfctl enrichment)
-        │   ├── mqtt_client.py               # Pure-Python MQTT 3.1.1 client + publisher
+        │   ├── server.py                   # Python aiohttp server (HTTP + WS + data pipeline)
+        │   ├── capture.py                  # ConnectionTracker (multi-interface SYN + pfctl enrichment + Collector)
+        │   ├── mqtt_client.py               # Pure-Python MQTT 3.1.1 client + 4-topic publisher
         │   ├── geoip_resolver.py           # MaxMind GeoIP lookup
         │   ├── download_geoip.py           # GeoIP database downloader (SHA256)
         │   ├── generate_config.py          # Reads OPNsense XML → JSON config
@@ -292,10 +421,14 @@ os-tcpgeo/
 | Layer | Technology |
 |-------|-----------|
 | Backend | Python 3 + aiohttp (async HTTP & WebSocket) |
-| Packet Capture | SYN-only BPF tcpdump + pfctl byte-count enrichment |
+| Packet Capture | Multi-interface SYN-only BPF `tcpdump` (one per WAN/LAN interface) |
+| Byte Enrichment | `pfctl -ss -v` kernel state table polling (every 30 s) with NAT address parsing |
+| Client Detection | LAN capture sees pre-NAT source IPs → per-client attribution |
+| Collector | Enrichment-based recovery — creates entries for missed SYNs from pfctl state data |
 | GeoIP | MaxMind GeoLite2-City (`maxminddb`) |
 | Frontend | [Globe.gl](https://globe.gl) 2.32 + [Three.js](https://threejs.org) 0.160 (lokal gebündelt) |
-| MQTT Export | Pure-Python MQTT 3.1.1 (keine externe Abhängigkeit) |
+| MQTT Export | Pure-Python MQTT 3.1.1 (keine externe Abhängigkeit), 4 topics, QoS 0, retain |
+| Analytics | Node-RED → InfluxDB 1.6 → Grafana 12.4 (dashboards included) |
 | Transport | Native WebSocket (JSON messages) |
 | OPNsense | MVC Framework (Phalcon PHP), configd, FreeBSD rc.d |
 
@@ -318,15 +451,17 @@ Das Plugin wurde umfassend gehärtet:
 | Privilege Separation | Service läuft als `nobody`, nur `tcpdump` und `pfctl` werden via sudoers eskaliert |
 | Authentication | Optionaler HTTP Basic Auth Schutz für das Globe-Frontend |
 | WebSocket Limits | Max. 10 Clients, 5 Connects/IP/Min, 30s Heartbeat |
-| IP Privacy | Letztes Oktett standardmäßig maskiert (z.B. `1.2.3.xxx`) |
+| IP Privacy | Letztes Oktett standardmäßig maskiert (z.B. `1.2.3.xxx`) — gilt für Globe UND MQTT |
 | XSS Prevention | Keine `innerHTML`-Nutzung, alle Werte via `textContent` + Regex-Validierung |
 | Path Traversal | `resolve()` + `is_relative_to()` für statische Dateien |
 | GeoIP Integrity | SHA256-Prüfsumme bei jedem Download verifiziert |
 | Input Validation | Interface-Names, Farbcodes, Ports serverseitig validiert |
 | Config Security | `config.json` mit `chmod 640` / `root:nobody` gesichert |
 | TLS/HTTPS | Optionales HTTPS mit selbstsigniertem oder OPNsense-Zertifikat (TLS 1.2+) |
-| MQTT Security | Optionale Username/Password-Authentifizierung, Credentials in config.json (chmod 640) |
+| MQTT Security | Optionale Username/Password-Authentifizierung, Publish-only (kein Subscribe), Credentials in config.json |
 | Timing-safe Auth | Passwortvergleich via `hmac.compare_digest()` |
+| Startup Safety | SIGTERM/SIGINT absorption during startup prevents configd signal kills |
+| Collector Safety | Key-based deduplication, kernel-only data source, no external input |
 
 Die vollständige Analyse aller 24 Dateien ist in [`security.md`](security.md) dokumentiert.
 

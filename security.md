@@ -186,33 +186,76 @@ Das Plugin hat **zwei getrennte Zugangsebenen**:
 - Bei Bedarf kann der MQTT-Broker TLS auf Port 8883 anbieten — eine zukünftige Erweiterung könnte optionales TLS hinzufügen.
 - Der MQTT-Client ist Publish-only und verarbeitet keine eingehenden Nachrichten (außer CONNACK/PINGRESP). Die Angriffsfläche ist minimal.
 
-### 2.9 Collector (Nacherfassung) — Sicherheitsbewertung
+### 2.9 Multi-Interface Capture & pfctl Enrichment — Sicherheitsbewertung
 
-Der Collector erstellt neue MQTT-Aggregationseinträge aus `pfctl`-Enrichment-Daten, wenn der ursprüngliche SYN-Paket nicht erfasst wurde (Race Condition beim Start, vorbestehende Verbindungen).
+TCPGeo betreibt separate `tcpdump`-Prozesse pro konfiguriertem Interface (WAN + LAN) und ergänzt Byte-Daten durch periodische `pfctl -ss -v`-Abfragen. Zusätzlich erkennt der Collector fehlende Verbindungen aus den Enrichment-Daten.
+
+#### 2.9.1 Multi-Interface Capture
 
 | Aspekt | Bewertung |
 |--------|-----------|
-| **Datenquelle** | `pfctl -ss -v` (Kernel State Table) — vertrauenswürdig, nicht manipulierbar aus Userspace |
-| **Eintragserzeugung** | Nur bei `is_update=True` und fehlendem Key in den Aggregationstabellen |
-| **Duplikat-Schutz** | Key-Check (client + country + city + port) vor Erzeugung — kein doppeltes Zählen |
-| **Count-Annahme** | Jeder Collector-Eintrag wird mit `count: 1` angelegt. Bei mehreren verpassten SYNs pro Flow wird die Verbindungsanzahl leicht unterschätzt (konservativ, kein Überzählen) |
-| **Byte-Genauigkeit** | Bytes stammen direkt aus `pfctl` — unabhängig von SYN-Erkennung korrekt |
-| **Richtungserkennung** | Wird aus dem Enrichment-Paket übernommen (outgoing/incoming). Korrekt, da `pfctl` die Richtung aus der State-Table liefert |
-| **Timing** | Collector-Einträge erscheinen mit bis zu einem `ENRICH_INTERVAL` (Default 15 s) Verzögerung |
-| **Ressourcen** | Kein zusätzlicher Netzwerk- oder CPU-Aufwand — nutzt bestehende Enrichment-Daten |
-| **Datenintegrität** | Keine Möglichkeit, über den Collector falsche Daten einzuschleusen — die Daten durchlaufen denselben GeoIP-Resolver und IP-Masking wie SYN-basierte Einträge |
+| **Prozess-Isolation** | ✅ Jeder `tcpdump` läuft als separater Subprocess (eigene PID, eigener BPF-Filter) |
+| **Interface-Validierung** | ✅ Device-Name wird mit `^[a-zA-Z0-9_.]+$` geprüft — keine Shell-Injection |
+| **Privilege Separation** | ✅ `tcpdump` via `sudo -n` (sudoers beschränkt auf `/usr/sbin/tcpdump`) |
+| **BPF-Filter** | ✅ Identischer Kernel-Filter auf allen Interfaces — konsistente Datenbasis |
+| **LAN-Sichtbarkeit** | ✅ LAN-Capture sieht pre-NAT Client-IPs. Nur private IPs (RFC 1918) werden als Client erkannt |
+| **WAN-Sichtbarkeit** | ✅ WAN-Capture sieht post-NAT Traffic. Source-IP = Firewall-Adresse für ausgehend |
+| **IP-Set Aufbau** | ✅ `all_local_ips` wird aus WAN-IPs + LAN-IPs + VIPs zusammengesetzt — keine User-Eingabe |
+| **Direction Detection** | ✅ Basiert auf `is_private_ip()` + `all_local_ips`-Lookup — deterministisch, kein Rate |
 
-**Risikomatrix:**
+**Risiko LAN-Capture:** Der LAN-Capture sieht den gesamten Client-Traffic vor NAT. Falls IP-Masking aktiv ist (`maskIPs=True`), werden Client-IPs in Globe und MQTT maskiert (`192.168.1.xxx`). Ohne Masking sind die echten Client-IPs sichtbar — dies ist eine bewusste Konfigurationsentscheidung des Administrators.
+
+#### 2.9.2 pfctl Enrichment
+
+| Aspekt | Bewertung |
+|--------|-----------|
+| **Datenquelle** | ✅ `pfctl -ss -v` — liest Kernel State Table (vertrauenswürdig, nicht manipulierbar aus Userspace) |
+| **Ausführung** | ✅ Via `sudo -n` alle 30 s, Pipe `pfctl | grep` (beide C-level, Python sieht nur Ergebnis) |
+| **grep -F Filterung** | ✅ Nur States mit bekannten lokalen IPs passieren den Filter — keine fremden Daten |
+| **NAT-Adress-Parsing** | ✅ Parenthesierte Adresse `(ip:port)` in pfctl-Output wird für Client-Zuordnung geparsed |
+| **Byte-Extraktion** | ✅ Regex `(\d+):(\d+)\s+bytes` — nur Zahlen, kein Injection-Risiko |
+| **Timeout** | ✅ 30 s Timeout auf `communicate()` — kein Hängenbleiben bei blockiertem pfctl |
+| **Fehlerbehandlung** | ✅ Alle Exceptions gefangen, Prozesse werden bei Timeout gekillt |
+| **CPU-Last** | ✅ ~0.07 % durchschnittlich (1 s Arbeit alle 30 s) |
+
+**NAT-Adress-Sicherheit:** Die geparsed NAT-Adresse stammt aus dem Kernel (`pfctl` Output) und nicht aus User-Input. Sie wird nur verwendet, um den lokalen Client korrekt zuzuordnen. Private IPs werden als `localIP` in den Event übernommen; Remote-IPs (public) durchlaufen die gleiche GeoIP-Auflösung + IP-Masking wie SYN-basierte Events.
+
+#### 2.9.3 Collector (Nacherfassung)
+
+Der Collector erstellt neue MQTT-Aggregationseinträge aus Enrichment-Daten, wenn der ursprüngliche SYN nicht erfasst wurde (Race Condition beim Start, vorbestehende Verbindungen, Interface-Flaps).
+
+| Aspekt | Bewertung |
+|--------|-----------|
+| **Eintragserzeugung** | ✅ Nur bei `is_update=True` und fehlendem Key in den Aggregationstabellen |
+| **Duplikat-Schutz** | ✅ Key-Check (client + country + city + port) vor Erzeugung — kein doppeltes Zählen |
+| **Count-Annahme** | ✅ `count: 1` — konservativ, kein Überzählen. Bei mehreren verpassten SYNs wird die Anzahl leicht unterschätzt |
+| **Byte-Genauigkeit** | ✅ Bytes stammen direkt aus `pfctl` — korrekt unabhängig von SYN-Erkennung |
+| **Richtungserkennung** | ✅ Aus dem Enrichment-Paket, basierend auf pfctl State-Richtung + NAT-Parsing |
+| **Scope** | ✅ Betrifft `_out_stats`, `_out_detail`, `_in_stats` — nur MQTT-Aggregation, kein Globe-Impact |
+| **Timing** | ✅ Einträge erscheinen mit max. 30 s Verzögerung (ein `ENRICH_INTERVAL`) |
+| **Datenintegrität** | ✅ Durchläuft identische Pipeline: GeoIP-Resolver + IP-Masking + Port-Label-Lookup |
+
+#### 2.9.4 Startreihenfolge
+
+| Schritt | Reihenfolge | Begründung |
+|---------|-------------|------------|
+| 1. `start_mqtt()` | VOR Capture | MQTT-Publisher ist bereit, bevor der erste SYN eintrifft |
+| 2. `start_capture()` | NACH MQTT | Kein SYN geht verloren wegen noch nicht initialisiertem Publisher |
+| 3. SIGTERM/SIGINT Absorption | Während Startup | Verhindert, dass configd-Signale den Prozess während Initialisierung killen |
+
+**Risikomatrix (Gesamtbewertung):**
 
 | Risiko | Schweregrad | Bewertung |
 |--------|-------------|-----------|
-| Collector erzeugt falsche Einträge | NIEDRIG | Ausgeschlossen — Datenquelle ist Kernel State Table (`pfctl`), nicht User-Input |
-| Duplikate verfälschen Statistiken | NIEDRIG | Key-basierte Deduplizierung verhindert Mehrfachanlage |
-| Collector wird als Amplification-Vektor missbraucht | KEINE | Kein externer Input — Enrichment läuft lokal, Daten fließen nur outbound zum MQTT-Broker |
-| Unterschätzung von Connection Counts | INFO | Design-Entscheidung: `count: 1` ist konservativ und akzeptabel, da Byte-Werte korrekt sind |
-| Race Condition zwischen Capture und MQTT | BEHOBEN | `start_mqtt()` wird vor `start_capture()` aufgerufen, sodass der Publisher bereit ist, bevor der erste SYN eintrifft |
+| Collector erzeugt falsche Einträge | KEINE | Datenquelle ist Kernel State Table, nicht User-Input |
+| Duplikate verfälschen Statistiken | KEINE | Key-basierte Deduplizierung verhindert Mehrfachanlage |
+| LAN-Capture leakt Client-IPs | NIEDRIG | Mitigiert durch `maskIPs`-Flag (Default: aktiviert) |
+| NAT-Parsing liefert falsche Client-IP | KEINE | Ausgeschlossen — pfctl-Output ist Kernel-generiert |
+| pfctl-Enrichment als Amplification-Vektor | KEINE | Kein externer Input, Daten fließen nur outbound zum MQTT-Broker |
+| Race Condition Capture ↔ MQTT | BEHOBEN | `start_mqtt()` vor `start_capture()` |
+| Interface-Spoofing | KEINE | Interface-Namen kommen aus OPNsense config.xml (Admin-kontrolliert) |
 
-**Fazit:** Der Collector erhöht die Datenqualität der MQTT-Statistiken ohne zusätzliche Angriffsfläche. Die Implementierung ist konservativ (nur `count: 1`, Key-Deduplizierung) und nutzt ausschließlich vertrauenswürdige Kernel-Daten als Quelle.
+**Fazit:** Das Multi-Interface-Capture mit pfctl-Enrichment und Collector erhöht die Datenqualität erheblich (Client-Zuordnung, Byte-Zähler, Nacherfassung) ohne zusätzliche Angriffsfläche. Alle Datenquellen sind Kernel-basiert (BPF, pfctl State Table) und nicht von extern manipulierbar.
 
 ---
 
@@ -494,10 +537,28 @@ Die Installation überschreibt alle Dateien. Konfigurationseinstellungen in `con
 │  │  └────────────┘  └────────────────────┘  │              │
 │  │         │                    ▲            │              │
 │  │         ▼                    │            │              │
-│  │  ┌────────────────────────────┐          │              │
-│  │  │  capture.py (sudo tcpdump) │          │              │
-│  │  │  → geoip_resolver.py      │          │              │
-│  │  └────────────────────────────┘          │              │
+│  │  ┌───────────────────────────────────┐   │              │
+│  │  │  capture.py — ConnectionTracker    │   │              │
+│  │  │                                    │   │              │
+│  │  │  tcpdump (WAN) ──┐                │   │              │
+│  │  │  tcpdump (LAN) ──┼→ _parse_line() │   │              │
+│  │  │  tcpdump (OPTx)──┘  (SYN + UDP)  │   │              │
+│  │  │                                    │   │              │
+│  │  │  pfctl -ss -v ──→ _poll_bytes()   │   │              │
+│  │  │  (enrichment, every 30 s)          │   │              │
+│  │  │  → NAT address parsing             │   │              │
+│  │  │  → byte counts + direction         │   │              │
+│  │  │                                    │   │              │
+│  │  │  → geoip_resolver.py              │   │              │
+│  │  └───────────────────────────────────┘   │              │
+│  │                    │                      │              │
+│  │                    ▼                      │              │
+│  │  ┌───────────────────────────────────┐   │              │
+│  │  │  mqtt_client.py (MQTT 3.1.1)      │   │              │
+│  │  │  4 Topics, QoS 0, retain=True     │   │              │
+│  │  │  Collector: auto-create from pfctl │   │              │
+│  │  │  → MQTT Broker (outbound TCP)     │   │              │
+│  │  └───────────────────────────────────┘   │              │
 │  └──────────────────────────────────────────┘              │
 │                                                             │
 │  ┌──────────────────────────────────────────┐              │
@@ -518,7 +579,9 @@ Die Installation überschreibt alle Dateien. Konfigurationseinstellungen in `con
 | WebSocket (ws://host:3333/ws) | Netzwerkzugang | Auth, Rate-Limit, Connection-Limit |
 | MQTT-Export (Port 1883) | Outbound TCP | Optional: Username/Password, IP-Masking, Publish-only |
 | Statische Dateien | Globe-Server | Path-Traversal-Schutz (resolve + is_relative_to) |
-| tcpdump-Subprocess | Lokal (nobody via sudo) | sudoers-Einschränkung auf /usr/sbin/tcpdump |
+| tcpdump-Subprocesses (multi) | Lokal (nobody via sudo) | sudoers auf /usr/sbin/tcpdump, Interface-Name validiert |
+| pfctl-Enrichment | Lokal (nobody via sudo) | sudoers auf /sbin/pfctl, Read-only State Table, Timeout 30 s |
+| Collector (Nacherfassung) | Intern (pfctl-Daten) | Key-Deduplizierung, Kernel-Datenquelle, kein externer Input |
 | config.json | Dateisystem | chmod 640, root:nobody |
 | GeoIP-Download | Outbound HTTPS | SHA256-Verifizierung |
 
@@ -526,31 +589,46 @@ Die Installation überschreibt alle Dateien. Konfigurationseinstellungen in `con
 
 ## 6. Datei-für-Datei-Analyse
 
-### server.py (427 Zeilen)
+### server.py (553 Zeilen)
 - **Auth:** ✅ Basic Auth Middleware vorhanden
 - **WebSocket:** ✅ Rate-Limiting, Connection-Limit, Heartbeat
-- **IP-Schutz:** ✅ mask_ip() aktiv
+- **IP-Schutz:** ✅ mask_ip() aktiv — gilt für Globe UND MQTT-Payloads
 - **0.0.0.0 Block:** ✅ Fallback auf 127.0.0.1
 - **Passwortvergleich:** ✅ hmac.compare_digest (timing-safe)
 - **Path-Traversal:** ✅ is_relative_to statt startswith
-- **Startreihenfolge:** ✅ `start_mqtt()` vor `start_capture()` — verhindert Race Condition bei SYN-Erfassung
+- **Startreihenfolge:** ✅ `start_mqtt()` vor `start_capture()` — verhindert Race Condition
+- **Signal-Absorption:** ✅ SIGTERM/SIGINT während Startup absorbiert (configd-Schutz)
+- **Capture Watchdog:** ✅ Auto-Restart bei tcpdump-Ausfall (alle 5 s geprüft)
+- **Data Pipeline:** ✅ Unified on_packet() → GeoIP → Globe + MQTT (SYN und Updates)
+- **Flush-Sampling:** ✅ SYN-Pakete immer gesendet, Enrichment-Updates bei Überlast gesampelt
 - **Restrisiko:** 🟡 Kein TLS (SEC-LOW-01), kein CSP (SEC-LOW-04)
 
-### mqtt_client.py (300+ Zeilen)
+### mqtt_client.py (594 Zeilen)
 - **Externe Abhängigkeiten:** ✅ Keine — reiner Python 3 stdlib (socket, struct, threading, json)
 - **Netzwerk:** ✅ Outbound-only TCP-Verbindung zum MQTT-Broker
 - **Authentifizierung:** ✅ Optional Username/Password im CONNECT-Paket
 - **Protokoll:** ✅ MQTT 3.1.1 (QoS 0 Publish-only, kein Subscribe)
-- **Thread-Safety:** ✅ Socket-Operationen mit Lock geschützt
-- **Fehlerbehandlung:** ✅ Verbindungsfehler mit Reconnect + Logging (kein Crash)
-- **Daten:** ✅ IP-Masking wird auf MQTT-Payloads angewendet
-- **Collector:** ✅ Nacherfassung erstellt Einträge aus Enrichment-Daten mit Key-Deduplizierung (kein Überzählen)
+- **Thread-Safety:** ✅ Alle Aggregationstabellen mit Lock geschützt
+- **Fehlerbehandlung:** ✅ Verbindungsfehler mit Reconnect + Logging (kein Crash, sleep-basiert)
+- **Daten:** ✅ IP-Masking wird auf alle MQTT-Payloads angewendet
+- **4 Topics:** ✅ stats/outgoing, stats/incoming, clients/outgoing, connections — alle mit retain=True
+- **Collector:** ✅ Nacherfassung: `is_update=True` → Key-Prüfung → ggf. neuer Eintrag mit `count: 1`
+- **Aggregation:** ✅ Per-client outgoing (country + city + port), per-port incoming (country), ring buffer connections
 - **Restrisiko:** 🟡 MQTT-Traffic unverschlüsselt (kein TLS). Akzeptabel für LAN-Betrieb.
 
 ### capture.py (580 Zeilen)
-- **Device-Validierung:** ✅ Regex-Prüfung
-- **Privilege Separation:** ✅ sudo-Eskalation wenn nicht root
+- **Multi-Interface:** ✅ Separate tcpdump pro WAN/LAN Interface, parallel in eigenen Threads
+- **BPF-Filter:** ✅ SYN-only + ausgewählte UDP Ports — identisch auf allen Interfaces
+- **Device-Validierung:** ✅ Jedes Zeichen gegen `isalnum() or c in '._'` geprüft
+- **Privilege Separation:** ✅ sudo-Eskalation nur für tcpdump und pfctl
 - **Subprocess:** ✅ Liste statt Shell-String (kein Shell-Injection)
+- **Direction Detection:** ✅ Basiert auf is_private_ip() + all_local_ips Set
+- **Client Detection:** ✅ LAN-Capture liefert pre-NAT Source-IP als localIP
+- **pfctl Enrichment:** ✅ Alle 30 s, Pipe pfctl|grep (C-level parallel), Timeout 30 s, force-kill bei Timeout
+- **NAT-Parsing:** ✅ Parenthesierte Adresse aus pfctl-Output → original Client-IP Zuordnung
+- **UDP Dedup:** ✅ TTL-basiert (30 s), auto-prune bei >5000 Einträgen
+- **IP Cache:** ✅ is_private_ip() gecacht, auto-prune bei >50000 Einträgen
+- **Capture Lifecycle:** ✅ Sauberes Terminate/Kill bei Stop, Thread-Join mit Timeout
 - **Restrisiko:** Keines identifiziert
 
 ### geoip_resolver.py (97 Zeilen)
@@ -563,10 +641,14 @@ Die Installation überschreibt alle Dateien. Konfigurationseinstellungen in `con
 - **HTTP-Safety:** ✅ Timeout (120s), User-Agent gesetzt
 - **Restrisiko:** 🟡 tarfile ohne data_filter (SEC-LOW-03, mitigiert)
 
-### generate_config.py (207 Zeilen)
+### generate_config.py (397 Zeilen)
 - **Config-Sicherheit:** ✅ chmod 640, chown root:nobody
 - **Default-Binding:** ✅ 127.0.0.1 als Fallback
 - **XML-Parsing:** ✅ ElementTree (kein XXE-Risiko da trusted /conf/config.xml)
+- **Interface-Auflösung:** ✅ OPNsense Interface-Namen → physische Devices + IPs (inkl. DHCP, VIPs)
+- **Multi-Interface:** ✅ Komma-getrennte WAN/LAN Listen werden korrekt aufgelöst
+- **MQTT-Config:** ✅ Server, Port, Credentials, Topic, Intervall aus config.xml extrahiert
+- **SSL-Zertifikate:** ✅ Self-signed oder OPNsense-Zertifikat, Private Key chmod 640
 - **Restrisiko:** Keines identifiziert
 
 ### rc.d/tcpgeo (120 Zeilen)

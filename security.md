@@ -1,7 +1,7 @@
 # TCPGeo OPNsense Plugin — Sicherheitsdokumentation
 
-**Datum:** 2026-03-04  
-**Version:** 1.0.2 (nach HTTPS/TLS-Erweiterung)  
+**Datum:** 2026-03-06  
+**Version:** 1.1.1 (nach MQTT-Erweiterung)  
 **Scope:** Vollständige Analyse aller Projektdateien (Quellcode, Konfiguration, Shell-Skripte, Frontend)
 
 ---

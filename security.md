@@ -28,6 +28,7 @@ Das Plugin hat **zwei getrennte Zugangsebenen**:
 |-------|--------|-------------------|---------------|
 | **OPNsense Web-UI** | Admin-Interface (Port 443) | OPNsense Session + API-Key | ACL `page-services-tcpgeo` |
 | **Globe-Frontend** | Konfigurierbarer Port (z.B. 3333) | Optional: HTTP Basic Auth | Kein Rollenkonzept (View-only) |
+| **MQTT-Broker** | Konfigurierbarer Host:Port (z.B. 1883) | Optional: Username/Password | QoS 0 Publish-only (kein Subscribe) |
 
 **Auth-Flow OPNsense-UI:**
 1. Admin meldet sich an der OPNsense Web-UI an (Session-Cookie)
@@ -41,6 +42,14 @@ Das Plugin hat **zwei getrennte Zugangsebenen**:
 3. Server prüft Passwort via `hmac.compare_digest()` (timing-safe)
 4. WebSocket-Verbindung erbt die Auth-Session (gleicher HTTP-Upgrade-Request)
 5. Kein Login-State — jeder Request wird einzeln geprüft
+
+**Auth-Flow MQTT-Export:**
+1. Server verbindet sich zu konfiguriertem MQTT-Broker (TCP Port 1883)
+2. Falls Username/Password konfiguriert: CONNECT-Paket mit Credentials
+3. Broker antwortet mit CONNACK (rc=0 bei Erfolg, rc=4/5 bei Auth-Fehler)
+4. Nur PUBLISH-Operationen (QoS 0) — kein SUBSCRIBE, keine bidirektionale Datenübertragung
+5. Keepalive via PINGREQ/PINGRESP, automatische Reconnection bei Verbindungsabbruch
+6. MQTT-Credentials werden aus config.json gelesen (chmod 640, root:nobody)
 
 ### 1.2 Netzwerk-Erreichbarkeit
 
@@ -157,6 +166,25 @@ Das Plugin hat **zwei getrennte Zugangsebenen**:
 | **Packet Buffer Overflow** | ✅ Hard-Cap bei 500, Sampling bei Überlast |
 | **Large File Upload** | ✅ N/A — Server akzeptiert keine POST-Bodys (nur GET + WS) |
 | **Slowloris** | 🟡 aiohttp default-Timeouts greifen, aber kein explizites Limit konfiguriert |
+
+### 2.8 MQTT-Sicherheit
+
+| Aspekt | Umsetzung |
+|--------|-----------||
+| **Protokoll** | MQTT 3.1.1 über TCP (Klartext) |
+| **Authentifizierung** | Optional: Username/Password im CONNECT-Paket |
+| **Autorisierung** | Publish-only (QoS 0, kein Subscribe) — keine Daten vom Broker empfangen |
+| **Datenschutz** | IP-Masking (`maskIPs`) wird auch auf MQTT-Payloads angewendet |
+| **Credentials** | In config.json gespeichert (chmod 640, root:nobody) |
+| **Verschlüsselung** | Kein TLS — MQTT-Traffic ist unverschlüsselt (LAN-Nutzung) |
+| **Fehlverhalten** | Verbindungsfehler werden geloggt, kein Crash/Retry-Flood (sleep-basiert) |
+| **Datenvolumen** | Kleine JSON-Payloads (1–10 KB), konfigurierbar 10–3600s Intervall |
+| **Angriffsfläche** | Outbound-only TCP-Verbindung, keine eingehenden Daten verarbeitet |
+
+**Risikobewertung:**
+- MQTT-Credentials werden im Klartext übertragen (kein TLS). Da MQTT typischerweise im LAN betrieben wird, ist dies akzeptabel.
+- Bei Bedarf kann der MQTT-Broker TLS auf Port 8883 anbieten — eine zukünftige Erweiterung könnte optionales TLS hinzufügen.
+- Der MQTT-Client ist Publish-only und verarbeitet keine eingehenden Nachrichten (außer CONNACK/PINGRESP). Die Angriffsfläche ist minimal.
 
 ---
 
@@ -460,6 +488,7 @@ Die Installation überschreibt alle Dateien. Konfigurationseinstellungen in `con
 | OPNsense Web-UI API | Authentifizierter Admin | ACL, Session, CSRF-Token (Framework) |
 | Globe-Webserver (Port 3333) | Netzwerkzugang | Optional: Basic Auth, Interface-Binding |
 | WebSocket (ws://host:3333/ws) | Netzwerkzugang | Auth, Rate-Limit, Connection-Limit |
+| MQTT-Export (Port 1883) | Outbound TCP | Optional: Username/Password, IP-Masking, Publish-only |
 | Statische Dateien | Globe-Server | Path-Traversal-Schutz (resolve + is_relative_to) |
 | tcpdump-Subprocess | Lokal (nobody via sudo) | sudoers-Einschränkung auf /usr/sbin/tcpdump |
 | config.json | Dateisystem | chmod 640, root:nobody |
@@ -478,7 +507,17 @@ Die Installation überschreibt alle Dateien. Konfigurationseinstellungen in `con
 - **Path-Traversal:** ✅ is_relative_to statt startswith
 - **Restrisiko:** 🟡 Kein TLS (SEC-LOW-01), kein CSP (SEC-LOW-04)
 
-### capture.py (220 Zeilen)
+### mqtt_client.py (300+ Zeilen)
+- **Externe Abhängigkeiten:** ✅ Keine — reiner Python 3 stdlib (socket, struct, threading, json)
+- **Netzwerk:** ✅ Outbound-only TCP-Verbindung zum MQTT-Broker
+- **Authentifizierung:** ✅ Optional Username/Password im CONNECT-Paket
+- **Protokoll:** ✅ MQTT 3.1.1 (QoS 0 Publish-only, kein Subscribe)
+- **Thread-Safety:** ✅ Socket-Operationen mit Lock geschützt
+- **Fehlerbehandlung:** ✅ Verbindungsfehler mit Reconnect + Logging (kein Crash)
+- **Daten:** ✅ IP-Masking wird auf MQTT-Payloads angewendet
+- **Restrisiko:** 🟡 MQTT-Traffic unverschlüsselt (kein TLS). Akzeptabel für LAN-Betrieb.
+
+### capture.py (580 Zeilen)
 - **Device-Validierung:** ✅ Regex-Prüfung
 - **Privilege Separation:** ✅ sudo-Eskalation wenn nicht root
 - **Subprocess:** ✅ Liste statt Shell-String (kein Shell-Injection)
@@ -601,6 +640,7 @@ Die Installation überschreibt alle Dateien. Konfigurationseinstellungen in `con
 | Roboto Mono Font (400/700) | Google Fonts | Lokal gebündelt | ✅ Offline |
 | aiohttp | PyPI | pip install | ✅ Lokal |
 | maxminddb | PyPI | pip install | ✅ Lokal |
+| mqtt_client.py | Eigene Implementierung | Im Projekt | ✅ Offline (reine Python stdlib) |
 | MaxMind GeoLite2-City | download.maxmind.com | Wöchentlicher Download | ⚠ Extern (SHA256-verifiziert) |
 | Python 3 | FreeBSD pkg | System-Paket | ✅ Lokal |
 | tcpdump | FreeBSD Basis | System | ✅ Lokal |

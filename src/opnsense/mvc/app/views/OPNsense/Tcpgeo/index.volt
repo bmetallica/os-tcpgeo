@@ -178,6 +178,12 @@
                     Registrierung unter <a href="https://www.maxmind.com/en/geolite2/signup" target="_blank">maxmind.com</a>.
                     Die Datenbank wird wöchentlich automatisch aktualisiert.
                 </div>
+                <div class="alert alert-info" style="margin-bottom: 10px;">
+                    <i class="fa fa-tachometer"></i>
+                    <strong>SYN-only Capture:</strong> TCPGeo erfasst nur das erste Paket (TCP SYN) jeder neuen Verbindung per Kernel-BPF-Filter.
+                    99,9 % der Pakete werden im Kernel verworfen — CPU-Last liegt nahe 0 %.
+                    Wählen Sie Internet-Schnittstellen (WAN) für eingehende und interne Schnittstellen (LAN/VLAN) für ausgehende Verbindungen mit Client-Zuordnung.
+                </div>
             </div>
         </div>
 

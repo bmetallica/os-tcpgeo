@@ -181,17 +181,27 @@ def main():
             'enabled': False,
             'listenAddress': '127.0.0.1',
             'listenPort': 3333,
-            'captureDevice': 'em0',
-            'captureIPs': [],
+            'wanDevices': [],
+            'wanIPs': [],
+            'lanDevices': [],
+            'lanIPs': [],
             'localLat': 50.0,
             'localLon': 10.0,
             'maxmindKey': '',
             'portColors': {},
             'globePassword': '',
             'maskIPs': True,
+            'showClients': False,
             'enableSSL': False,
             'sslCertFile': '',
-            'sslKeyFile': ''
+            'sslKeyFile': '',
+            'mqttEnabled': False,
+            'mqttServer': '',
+            'mqttPort': 1883,
+            'mqttUsername': '',
+            'mqttPassword': '',
+            'mqttTopic': 'tcpgeo',
+            'mqttInterval': 60
         }
     else:
         general = tcpgeo.find('general')
@@ -202,10 +212,12 @@ def main():
         enabled = general.findtext('enabled', '0') == '1'
         listen_if = general.findtext('listeninterface', 'lan')
         listen_port = int(general.findtext('listenport', '3333'))
-        capture_if = general.findtext('captureinterface', 'wan')
+        wan_if_raw = general.findtext('waninterfaces', 'wan')
+        lan_if_raw = general.findtext('laninterfaces', 'lan')
         maxmind_key = general.findtext('maxmindkey', '')
         globe_password = general.findtext('globepassword', '')
         mask_ips = general.findtext('maskips', '1') == '1'
+        show_clients = general.findtext('showclients', '0') == '1'
         enable_ssl = general.findtext('enablessl', '0') == '1'
         ssl_mode = general.findtext('sslmode', 'selfsigned')
         ssl_cert_ref = general.findtext('sslcert', '')
@@ -220,22 +232,62 @@ def main():
         except (ValueError, TypeError):
             local_lon = 10.0
 
-        # Resolve interface names
+        # MQTT export settings
+        mqtt_enabled = general.findtext('mqttenabled', '0') == '1'
+        mqtt_server = general.findtext('mqttserver', '')
+        mqtt_port_raw = general.findtext('mqttport', '1883')
+        try:
+            mqtt_port = int(mqtt_port_raw)
+        except (ValueError, TypeError):
+            mqtt_port = 1883
+        mqtt_username = general.findtext('mqttusername', '')
+        mqtt_password = general.findtext('mqttpassword', '')
+        mqtt_topic = general.findtext('mqtttopic', 'tcpgeo')
+        mqtt_interval_raw = general.findtext('mqttinterval', '60')
+        try:
+            mqtt_interval = int(mqtt_interval_raw)
+        except (ValueError, TypeError):
+            mqtt_interval = 60
+
+        # Resolve interface names to devices and IPs
+        # OPNsense stores multi-select as comma-separated string
+        wan_interfaces = [s.strip() for s in wan_if_raw.split(',') if s.strip()]
+        lan_interfaces = [s.strip() for s in lan_if_raw.split(',') if s.strip()]
+
+        wan_devices = []
+        wan_ips = []
+        for ifname in wan_interfaces:
+            dev = get_interface_device(root, ifname)
+            if dev and dev not in wan_devices:
+                wan_devices.append(dev)
+            for ip in get_interface_ips(root, ifname):
+                if ip not in wan_ips:
+                    wan_ips.append(ip)
+            if dev:
+                for ip in get_all_interface_ips(dev):
+                    if ip not in wan_ips:
+                        wan_ips.append(ip)
+
+        lan_devices = []
+        lan_ips = []
+        for ifname in lan_interfaces:
+            dev = get_interface_device(root, ifname)
+            if dev and dev not in lan_devices:
+                lan_devices.append(dev)
+            for ip in get_interface_ips(root, ifname):
+                if ip not in lan_ips:
+                    lan_ips.append(ip)
+            if dev:
+                for ip in get_all_interface_ips(dev):
+                    if ip not in lan_ips:
+                        lan_ips.append(ip)
+
         listen_device = get_interface_device(root, listen_if)
-        capture_device = get_interface_device(root, capture_if)
-
-        # Get IPs
-        listen_ips = get_interface_ips(root, listen_if)
-        capture_ips = get_interface_ips(root, capture_if)
-
-        # Also get IPs directly from ifconfig for the capture device
-        if capture_device:
-            ifconfig_ips = get_all_interface_ips(capture_device)
-            for ip in ifconfig_ips:
-                if ip not in capture_ips:
-                    capture_ips.append(ip)
 
         # Listen address: use first IP of the listen interface
+        listen_ips = get_interface_ips(root, listen_if)
+        if not listen_ips and listen_device:
+            listen_ips = get_all_interface_ips(listen_device)
         listen_address = listen_ips[0] if listen_ips else '127.0.0.1'
 
         # Port-color mappings
@@ -259,17 +311,27 @@ def main():
             'enabled': enabled,
             'listenAddress': listen_address,
             'listenPort': listen_port,
-            'captureDevice': capture_device or 'em0',
-            'captureIPs': capture_ips,
+            'wanDevices': wan_devices,
+            'wanIPs': wan_ips,
+            'lanDevices': lan_devices,
+            'lanIPs': lan_ips,
             'localLat': local_lat,
             'localLon': local_lon,
             'maxmindKey': maxmind_key,
             'portColors': port_colors,
             'globePassword': globe_password,
             'maskIPs': mask_ips,
+            'showClients': show_clients,
             'enableSSL': False,
             'sslCertFile': '',
-            'sslKeyFile': ''
+            'sslKeyFile': '',
+            'mqttEnabled': mqtt_enabled,
+            'mqttServer': mqtt_server,
+            'mqttPort': mqtt_port,
+            'mqttUsername': mqtt_username,
+            'mqttPassword': mqtt_password,
+            'mqttTopic': mqtt_topic,
+            'mqttInterval': mqtt_interval
         }
 
         # Handle SSL/TLS certificate
@@ -318,8 +380,14 @@ def main():
     print(f"[tcpgeo-config] Konfiguration geschrieben: {OUTPUT_JSON}")
     print(f"[tcpgeo-config] Enabled: {config['enabled']}")
     print(f"[tcpgeo-config] Listen: {config['listenAddress']}:{config['listenPort']}")
-    print(f"[tcpgeo-config] Capture: {config['captureDevice']} (IPs: {', '.join(config['captureIPs'])})")
+    print(f"[tcpgeo-config] WAN: {', '.join(config['wanDevices'])} (IPs: {', '.join(config['wanIPs'])})")
+    print(f"[tcpgeo-config] LAN: {', '.join(config['lanDevices'])} (IPs: {', '.join(config['lanIPs'])})")
     print(f"[tcpgeo-config] Port-Farben: {len(config['portColors'])} Einträge")
+    if config.get('mqttEnabled'):
+        print(f"[tcpgeo-config] MQTT: {config['mqttServer']}:{config['mqttPort']} "
+              f"Topic={config['mqttTopic']} Intervall={config['mqttInterval']}s")
+    else:
+        print("[tcpgeo-config] MQTT: deaktiviert")
 
     return 0
 

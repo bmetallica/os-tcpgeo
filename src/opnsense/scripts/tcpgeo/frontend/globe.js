@@ -15,6 +15,7 @@
     var portColors = {};
     var localLat = 50.0;
     var localLon = 10.0;
+    var showClients = false;
 
     // ---- State ----
     var globe = null;
@@ -22,9 +23,16 @@
     var arcsData = [];
     var stats = { packets: 0, countries: new Set(), arcs: 0 };
     var MAX_ARCS = 500;
-    var ARC_TTL = 5000;
+    var ARC_TTL = 35000;          // arcs live 35s (must be > ENRICH_INTERVAL=30s)
     var RECONNECT_DELAY = 3000;
     var reconnectTimer = null;
+
+    // ---- Client tracking ----
+    var CLIENT_EXPIRE = 120000;   // expire clients after 2min without new SYN
+    var CONN_EXPIRE   = ARC_TTL;  // connections expire with their arcs (synced)
+    var MAX_CLIENT_CONNS = 12;    // max unique connections shown per client
+    var clientMap = {};            // localIP → { ip, out, in, conns{}, ts }
+    var clientsDirty = false;
 
     // ---- Performance: Globe update throttle ----
     var GLOBE_UPDATE_MS = 800;
@@ -40,7 +48,7 @@
 
     // ---- Labels at arc endpoints (GPU sprites, no DOM) ----
     var MAX_LABELS = 30;
-    var LABEL_TTL = 6000;
+    var LABEL_TTL = 35000;  // match ARC_TTL
     var labelMap = {};  // key "lat,lon" → { label, lat, lon, color, ts }
     var labelsDirty = false;
 
@@ -276,7 +284,24 @@
         if (cfg.portColors) { portColors = cfg.portColors; buildPortLegend(); }
         if (cfg.localLat != null) localLat = cfg.localLat;
         if (cfg.localLon != null) localLon = cfg.localLon;
+        if (cfg.showClients != null) {
+            showClients = !!cfg.showClients;
+            toggleClientView(showClients);
+        }
         if (globe) globe.pointOfView({ lat: localLat, lng: localLon, altitude: 2.2 }, 1500);
+    }
+
+    // ---- Toggle between event list and client list ----
+    function toggleClientView(enabled) {
+        var $eventHud = document.getElementById('event-hud');
+        var $clientHud = document.getElementById('client-hud');
+        if (enabled) {
+            if ($eventHud) $eventHud.style.display = 'none';
+            if ($clientHud) $clientHud.style.display = '';
+        } else {
+            if ($eventHud) $eventHud.style.display = '';
+            if ($clientHud) $clientHud.style.display = 'none';
+        }
     }
 
     // ==============================================================
@@ -288,10 +313,114 @@
 
         for (var i = 0; i < packets.length; i++) {
             var pkt = packets[i];
-            stats.packets++;
-            if (pkt.country) stats.countries.add(pkt.country);
+            var isUpdate = !!pkt.update;
 
             var arcColor = pkt.color || (pkt.direction === 'outgoing' ? nextMultiColor() : '#0ff');
+
+            // Arc stroke width: scale by connection bytes
+            // 0 bytes = 0.5, up to 2.0 for heavy connections (log scale)
+            var stroke = 0.5;
+            if (pkt.bytes && pkt.bytes > 0) {
+                stroke = Math.min(2.0, 0.5 + Math.log10(Math.max(pkt.bytes, 1)) * 0.25);
+            }
+
+            // Remote endpoint coordinates
+            var remoteLat = pkt.lat;
+            var remoteLon = pkt.lon;
+
+            if (isUpdate) {
+                // ---- ENRICHMENT UPDATE: refresh existing arcs or re-create if expired ----
+                var rLatR = Math.round(remoteLat * 10);
+                var rLonR = Math.round(remoteLon * 10);
+                var arcFound = false;
+                for (var u = 0; u < arcsData.length; u++) {
+                    var a = arcsData[u];
+                    var aRemLat, aRemLon;
+                    if (a.startLat === localLat && a.startLon === localLon) {
+                        aRemLat = a.endLat; aRemLon = a.endLon;
+                    } else {
+                        aRemLat = a.startLat; aRemLon = a.startLon;
+                    }
+                    if (Math.round(aRemLat * 10) === rLatR && Math.round(aRemLon * 10) === rLonR) {
+                        if (stroke > a.stroke) a.stroke = stroke;
+                        a.ts = now;
+                        arcFound = true;
+                    }
+                }
+                // Connection still active in pfctl but arc already expired → re-create it
+                if (!arcFound && pkt.bytes > 0) {
+                    var uSLat, uSLon, uELat, uELon;
+                    if (pkt.direction === 'outgoing') {
+                        uSLat = localLat; uSLon = localLon; uELat = remoteLat; uELon = remoteLon;
+                    } else {
+                        uSLat = remoteLat; uSLon = remoteLon; uELat = localLat; uELon = localLon;
+                    }
+                    arcsData.push({
+                        startLat: uSLat, startLon: uSLon, endLat: uELat, endLon: uELon,
+                        color: arcColor, stroke: stroke, ts: now
+                    });
+                }
+
+                // Update labels too (keep alive or create)
+                var lkeyU = (Math.round(remoteLat * 10) / 10) + ',' + (Math.round(remoteLon * 10) / 10);
+                var locNameU = pkt.city || pkt.country || '';
+                if (locNameU && remoteLat && remoteLon) {
+                    labelMap[lkeyU] = {
+                        label: locNameU, lat: remoteLat, lng: remoteLon,
+                        color: arcColor, size: 1.2, ts: now
+                    };
+                    labelsDirty = true;
+                } else if (labelMap[lkeyU]) {
+                    labelMap[lkeyU].ts = now;
+                    labelsDirty = true;
+                }
+
+                // Client tracking: update bytes or create new conn entry
+                if (showClients && pkt.localIP) {
+                    var cipU = pkt.localIP;
+                    // Create client if it doesn't exist (pfctl discovered connection)
+                    if (!clientMap[cipU]) {
+                        clientMap[cipU] = { ip: cipU, out: 0, in_: 0, bytes: 0, conns: {}, ts: now };
+                    }
+                    var clientU = clientMap[cipU];
+                    var connPortU = pkt.portLabel || ('Port ' + pkt.port);
+                    var connRemoteU = pkt.city ? (pkt.city + ', ' + pkt.country) : (pkt.country || pkt.ip);
+                    var connKeyU = connPortU + '|' + connRemoteU;
+                    if (clientU.conns[connKeyU]) {
+                        var oldBytes = clientU.conns[connKeyU].bytes || 0;
+                        var newBytes = pkt.bytes || 0;
+                        if (newBytes > oldBytes) {
+                            clientU.bytes += (newBytes - oldBytes);
+                            clientU.conns[connKeyU].bytes = newBytes;
+                        }
+                        clientU.conns[connKeyU].ts = now;
+                        clientU.conns[connKeyU].lat = remoteLat;
+                        clientU.conns[connKeyU].lon = remoteLon;
+                    } else {
+                        // Create new conn entry from enrichment data
+                        clientU.conns[connKeyU] = {
+                            dir: pkt.direction === 'outgoing' ? '\u2192' : '\u2190',
+                            remote: connRemoteU,
+                            port: connPortU,
+                            color: arcColor,
+                            bytes: pkt.bytes || 0,
+                            count: 0,
+                            ts: now,
+                            lat: remoteLat,
+                            lon: remoteLon
+                        };
+                        clientU.bytes += (pkt.bytes || 0);
+                    }
+                    clientsDirty = true;
+                }
+
+                // DON'T increment stats.packets, DON'T add to event ring
+                continue;
+            }
+
+            // ---- NEW CONNECTION: normal processing ----
+            stats.packets++;
+            if (pkt.country) stats.countries.add(pkt.country);
 
             var sLat, sLon, eLat, eLon;
             if (pkt.direction === 'outgoing') {
@@ -302,13 +431,12 @@
 
             arcsData.push({
                 startLat: sLat, startLon: sLon, endLat: eLat, endLon: eLon,
-                color: arcColor, stroke: 0.5, ts: now
+                color: arcColor, stroke: stroke, ts: now
             });
 
             // Track label at the REMOTE endpoint (deduplicated by location)
             var locName = pkt.city || pkt.country || '';
             if (locName && pkt.lat && pkt.lon) {
-                // Round to 1 decimal to merge nearby points
                 var lkey = (Math.round(pkt.lat * 10) / 10) + ',' + (Math.round(pkt.lon * 10) / 10);
                 labelMap[lkey] = {
                     label: locName,
@@ -329,6 +457,42 @@
                 color: arcColor
             });
             if (eventRing.length > EVENT_ROWS) eventRing.length = EVENT_ROWS;
+
+            // ---- Client tracking ----
+            if (showClients && pkt.localIP) {
+                var cip = pkt.localIP;
+                if (!clientMap[cip]) {
+                    clientMap[cip] = { ip: cip, out: 0, in_: 0, bytes: 0, conns: {}, ts: now };
+                }
+                var client = clientMap[cip];
+                client.ts = now;
+                if (pkt.direction === 'outgoing') client.out++;
+                else client.in_++;
+                // Deduplicate connections by port+remote (unique key)
+                var connPort = pkt.portLabel || ('Port ' + pkt.port);
+                var connRemote = pkt.city ? (pkt.city + ', ' + pkt.country) : (pkt.country || pkt.ip);
+                var connKey = connPort + '|' + connRemote;
+                if (client.conns[connKey]) {
+                    client.conns[connKey].count++;
+                    client.conns[connKey].ts = now;
+                    client.conns[connKey].color = arcColor;
+                    client.conns[connKey].lat = pkt.lat;
+                    client.conns[connKey].lon = pkt.lon;
+                } else {
+                    client.conns[connKey] = {
+                        dir: pkt.direction === 'outgoing' ? '\u2192' : '\u2190',
+                        remote: connRemote,
+                        port: connPort,
+                        color: arcColor,
+                        bytes: 0,
+                        count: 1,
+                        ts: now,
+                        lat: pkt.lat,
+                        lon: pkt.lon
+                    };
+                }
+                clientsDirty = true;
+            }
         }
 
         // Expire + cap arcs
@@ -411,7 +575,7 @@
 
         // Events — update pre-created rows only via textContent + style
         // NO createElement, NO removeChild, NO innerHTML => ZERO reflow
-        if (eventsDirty) {
+        if (eventsDirty && !showClients) {
             eventsDirty = false;
             for (var i = 0; i < EVENT_ROWS; i++) {
                 var el = eventRowEls[i];
@@ -426,6 +590,12 @@
                     el.row.style.visibility = 'hidden';
                 }
             }
+        }
+
+        // Client list — rebuild when dirty (runs in idle callback, so safe)
+        if (clientsDirty && showClients) {
+            clientsDirty = false;
+            renderClientList();
         }
 
         // Reschedule
@@ -480,6 +650,150 @@
             if (labelMap[keys[k]].ts < lcutoff) { delete labelMap[keys[k]]; changed = true; }
         }
         if (changed) labelsDirty = true;
+
+        // Expire individual connections + inactive clients
+        // Sync connections to arc existence: no arc → remove connection
+        if (showClients) {
+            // Build set of active arc remote locations (rounded to 0.1°)
+            var arcLocs = {};
+            for (var ai = 0; ai < arcsData.length; ai++) {
+                var arc = arcsData[ai];
+                var arcRemLat, arcRemLon;
+                if (arc.startLat === localLat && arc.startLon === localLon) {
+                    arcRemLat = arc.endLat; arcRemLon = arc.endLon;
+                } else {
+                    arcRemLat = arc.startLat; arcRemLon = arc.startLon;
+                }
+                arcLocs[Math.round(arcRemLat * 10) + ',' + Math.round(arcRemLon * 10)] = true;
+            }
+
+            var ccutoff = now - CLIENT_EXPIRE;
+            var ckeys = Object.keys(clientMap);
+            var cchanged = false;
+            for (var c = 0; c < ckeys.length; c++) {
+                var cl = clientMap[ckeys[c]];
+                // Prune individual connections: must have matching arc OR be within time window
+                var ck = Object.keys(cl.conns);
+                for (var j = 0; j < ck.length; j++) {
+                    var cn = cl.conns[ck[j]];
+                    var hasArc = (cn.lat != null)
+                        ? !!arcLocs[Math.round(cn.lat * 10) + ',' + Math.round(cn.lon * 10)]
+                        : (cn.ts >= now - CONN_EXPIRE);  // fallback for legacy entries
+                    if (!hasArc) {
+                        delete cl.conns[ck[j]];
+                        cchanged = true;
+                    }
+                }
+                // Remove entire client if no connections left or client expired
+                if (Object.keys(cl.conns).length === 0 || cl.ts < ccutoff) {
+                    delete clientMap[ckeys[c]];
+                    cchanged = true;
+                }
+            }
+            if (cchanged) clientsDirty = true;
+        }
+    }
+
+    // ---- Client List Rendering ----
+    function renderClientList() {
+        var $list = document.getElementById('client-list');
+        if (!$list) return;
+
+        // Expire old clients + stale connections (arc-synced)
+        var now = Date.now();
+        var ccutoff = now - CLIENT_EXPIRE;
+
+        // Build set of active arc locations for sync check
+        var arcLocs = {};
+        for (var ai = 0; ai < arcsData.length; ai++) {
+            var arc = arcsData[ai];
+            var arcRemLat, arcRemLon;
+            if (arc.startLat === localLat && arc.startLon === localLon) {
+                arcRemLat = arc.endLat; arcRemLon = arc.endLon;
+            } else {
+                arcRemLat = arc.startLat; arcRemLon = arc.startLon;
+            }
+            arcLocs[Math.round(arcRemLat * 10) + ',' + Math.round(arcRemLon * 10)] = true;
+        }
+
+        var ckeys = Object.keys(clientMap);
+        for (var x = 0; x < ckeys.length; x++) {
+            var cl = clientMap[ckeys[x]];
+            // Prune connections without matching arc
+            var ck = Object.keys(cl.conns);
+            for (var cx = 0; cx < ck.length; cx++) {
+                var cn = cl.conns[ck[cx]];
+                var hasArc = (cn.lat != null)
+                    ? !!arcLocs[Math.round(cn.lat * 10) + ',' + Math.round(cn.lon * 10)]
+                    : true;  // keep legacy entries
+                if (!hasArc) delete cl.conns[ck[cx]];
+            }
+            // Remove entire client if empty or expired
+            if (Object.keys(cl.conns).length === 0 || cl.ts < ccutoff) delete clientMap[ckeys[x]];
+        }
+
+        // Sort clients by last octet of IP address (ascending)
+        var clients = Object.keys(clientMap).map(function(k) { return clientMap[k]; });
+        clients.sort(function(a, b) {
+            var lastA = parseInt(a.ip.split('.').pop(), 10) || 0;
+            var lastB = parseInt(b.ip.split('.').pop(), 10) || 0;
+            return lastA - lastB;
+        });
+
+        // Build HTML (minimal DOM ops — single innerHTML write)
+        var html = '';
+        for (var i = 0; i < clients.length && i < 20; i++) {
+            var cl = clients[i];
+            var totalConns = cl.out + cl.in_;
+            var bytesStr = formatBytes(cl.bytes);
+
+            html += '<div class="client-entry">';
+            html += '<div class="client-header">';
+            html += '<span class="client-ip">' + escHtml(cl.ip) + '</span>';
+            html += '<span class="client-stats">';
+            html += '<span class="client-out" title="Ausgehend">\u2192 ' + cl.out + '</span>';
+            html += '<span class="client-in" title="Eingehend">\u2190 ' + cl.in_ + '</span>';
+            html += '<span class="client-bytes">' + bytesStr + '</span>';
+            html += '</span></div>';
+
+            // Show unique connections sorted by most recent, capped
+            var connKeys = Object.keys(cl.conns);
+            // Sort by timestamp descending
+            connKeys.sort(function(a, b) { return cl.conns[b].ts - cl.conns[a].ts; });
+            var shown = 0;
+            for (var j = 0; j < connKeys.length && shown < MAX_CLIENT_CONNS; j++) {
+                var cn = cl.conns[connKeys[j]];
+                var safeColor = /^#[0-9a-fA-F]{6}$/.test(cn.color) ? cn.color : '#0ff';
+                html += '<div class="client-conn">';
+                html += '<span class="client-conn-dot" style="background:' + safeColor + ';box-shadow:0 0 6px ' + safeColor + '"></span>';
+                html += '<span class="client-conn-dir">' + cn.dir + '</span>';
+                html += '<span class="client-conn-port">' + escHtml(cn.port);
+                if (cn.count > 1) html += ' \u00d7' + cn.count;
+                html += '</span>';
+                html += '<span class="client-conn-remote">' + escHtml(cn.remote) + '</span>';
+                html += '</div>';
+                shown++;
+            }
+            html += '</div>';
+        }
+
+        if (clients.length === 0) {
+            html = '<div class="client-empty">Warte auf Verbindungen\u2026</div>';
+        }
+
+        $list.innerHTML = html;
+    }
+
+    function formatBytes(b) {
+        if (b >= 1073741824) return (b / 1073741824).toFixed(1) + ' GB';
+        if (b >= 1048576) return (b / 1048576).toFixed(1) + ' MB';
+        if (b >= 1024) return (b / 1024).toFixed(1) + ' KB';
+        return b + ' B';
+    }
+
+    function escHtml(s) {
+        if (!s) return '';
+        return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
     }
 
     // ---- Boot ----

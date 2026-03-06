@@ -18,10 +18,16 @@
         <help>TCP-Port für den Globus-Webserver (z.B. 3333). Muss zwischen 1024 und 65535 liegen.</help>
     </field>
     <field>
-        <id>general.captureinterface</id>
-        <label>Capture-Schnittstelle</label>
-        <type>dropdown</type>
-        <help>Netzwerk-Schnittstelle die überwacht wird (z.B. WAN). Hier wird der Traffic per tcpdump mitgelesen.</help>
+        <id>general.waninterfaces</id>
+        <label>Internet-Schnittstellen (WAN)</label>
+        <type>select_multiple</type>
+        <help>WAN-Schnittstellen mit Internetzugang. Hier werden eingehende Verbindungen (z.B. Port-Forwards) erkannt. Mehrfachauswahl möglich.</help>
+    </field>
+    <field>
+        <id>general.laninterfaces</id>
+        <label>Interne Schnittstellen (LAN)</label>
+        <type>select_multiple</type>
+        <help>LAN/VLAN-Schnittstellen der internen Clients. Hier werden ausgehende Verbindungen MIT Client-IP erkannt (vor NAT). Mehrfachauswahl möglich. Für Client-Zuordnung mindestens ein internes Interface auswählen.</help>
     </field>
     <field>
         <id>general.maxmindkey</id>
@@ -40,6 +46,12 @@
         <label>IP-Adressen verschleiern</label>
         <type>checkbox</type>
         <help>Verschleiert das letzte Oktett der IP-Adressen im Frontend (z.B. 1.2.3.xxx). Standardmäßig aktiviert.</help>
+    </field>
+    <field>
+        <id>general.showclients</id>
+        <label>Interne Clients anzeigen</label>
+        <type>checkbox</type>
+        <help>Zeigt im Globus-Frontend eine Client-Übersicht statt der Live-Events an. Für jeden internen Client werden aktive Verbindungen (ein-/ausgehend) gruppiert dargestellt. Voraussetzung: Mindestens eine interne Schnittstelle (LAN) ausgewählt.</help>
     </field>
     <field>
         <id>general.enablessl</id>
@@ -74,5 +86,51 @@
         <label>Längengrad (Longitude)</label>
         <type>text</type>
         <help>Längengrad des OPNsense-Standorts (-180 bis 180). Wird als Quell-/Zielpunkt für Verbindungslinien auf dem Globus verwendet. Beispiel: 12.3747</help>
+    </field>
+    <field>
+        <type>header</type>
+        <label>MQTT Export</label>
+    </field>
+    <field>
+        <id>general.mqttenabled</id>
+        <label>MQTT aktivieren</label>
+        <type>checkbox</type>
+        <help>Aktiviert die periodische Übertragung von Verbindungsdaten an einen MQTT-Broker. Ideal für Statistiken, Dashboards (Grafana) oder Home Assistant.</help>
+    </field>
+    <field>
+        <id>general.mqttserver</id>
+        <label>MQTT-Server</label>
+        <type>text</type>
+        <help>Hostname oder IP-Adresse des MQTT-Brokers (z.B. 192.168.1.10 oder mqtt.local).</help>
+    </field>
+    <field>
+        <id>general.mqttport</id>
+        <label>MQTT-Port</label>
+        <type>text</type>
+        <help>TCP-Port des MQTT-Brokers. Standard: 1883.</help>
+    </field>
+    <field>
+        <id>general.mqttusername</id>
+        <label>MQTT-Benutzername</label>
+        <type>text</type>
+        <help>Optionaler Benutzername für die MQTT-Authentifizierung. Leer lassen wenn keine Authentifizierung benötigt wird.</help>
+    </field>
+    <field>
+        <id>general.mqttpassword</id>
+        <label>MQTT-Passwort</label>
+        <type>password</type>
+        <help>Optionales Passwort für die MQTT-Authentifizierung.</help>
+    </field>
+    <field>
+        <id>general.mqtttopic</id>
+        <label>MQTT-Topic</label>
+        <type>text</type>
+        <help>Basis-Topic für MQTT-Nachrichten (Standard: tcpgeo). Daten werden unter {topic}/stats/outgoing, {topic}/stats/incoming und {topic}/connections veröffentlicht.</help>
+    </field>
+    <field>
+        <id>general.mqttinterval</id>
+        <label>MQTT-Intervall (Sekunden)</label>
+        <type>text</type>
+        <help>Wie oft Daten an den MQTT-Broker gesendet werden (10–3600 Sekunden). Standard: 60 Sekunden.</help>
     </field>
 </form>

@@ -394,6 +394,107 @@ html, body {
   contain: layout style paint;
 }
 
+/* ---- Client List (showClients mode) ---- */
+#client-hud {
+  top: 60px;
+  bottom: 12px;
+  max-height: none;
+  overflow-y: auto;
+  pointer-events: auto;
+  contain: layout style paint;
+}
+
+#client-list {
+  max-height: none;
+  overflow-y: visible;
+  contain: layout style paint;
+}
+
+.client-entry {
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  padding: 0.4em 0;
+}
+
+.client-entry:last-child { border-bottom: none; }
+
+.client-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.8em;
+  margin-bottom: 0.2em;
+}
+
+.client-ip {
+  color: var(--neon-cyan);
+  font-weight: bold;
+  font-size: 0.95em;
+  text-shadow: 0 0 6px rgba(0,255,255,0.3);
+}
+
+.client-stats {
+  display: flex;
+  gap: 0.6em;
+  font-size: 0.8em;
+}
+
+.client-out {
+  color: var(--neon-green);
+}
+
+.client-in {
+  color: var(--neon-pink);
+}
+
+.client-bytes {
+  color: var(--text-dim);
+  font-size: 0.9em;
+}
+
+.client-conn {
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  padding: 0.1em 0 0.1em 1em;
+  font-size: 0.8em;
+  line-height: 1.4;
+}
+
+.client-conn-dot {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.client-conn-dir {
+  color: var(--neon-cyan);
+  font-weight: bold;
+  flex-shrink: 0;
+}
+
+.client-conn-port {
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.client-conn-remote {
+  color: var(--text-dim);
+  margin-left: auto;
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 140px;
+}
+
+.client-empty {
+  color: var(--text-dim);
+  font-size: 0.85em;
+  padding: 0.5em 0;
+}
+
 /* ================================================================
    RESPONSIVE: TABLETS & SMALL DESKTOPS  (<= 900px)
    Same layout, slightly tighter spacing.

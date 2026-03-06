@@ -9,6 +9,7 @@ Captures traffic locally via tcpdump, resolves GeoIP, streams to globe via WebSo
 import asyncio
 import json
 import os
+import signal
 import ssl
 import sys
 import logging
@@ -20,8 +21,9 @@ from collections import defaultdict
 
 from aiohttp import web
 
-from capture import TcpdumpCapture
+from capture import ConnectionTracker
 from geoip_resolver import GeoIPResolver
+from mqtt_client import MQTTPublisher
 
 # ---- Logging ----
 logging.basicConfig(
@@ -56,8 +58,10 @@ def load_config():
             'enabled': False,
             'listenAddress': '127.0.0.1',
             'listenPort': 3333,
-            'captureDevice': 'em0',
-            'captureIPs': [],
+            'wanDevices': [],
+            'wanIPs': [],
+            'lanDevices': [],
+            'lanIPs': [],
             'localLat': 50.0,
             'localLon': 10.0,
             'maxmindKey': '',
@@ -71,6 +75,7 @@ def load_config():
 config = load_config()
 geoip = GeoIPResolver(SCRIPT_DIR / 'geoip' / 'GeoLite2-City.mmdb')
 capture = None
+mqtt_pub = None
 ws_clients = set()
 packet_buffer = []
 ws_rate_log = defaultdict(list)  # IP → [connect timestamps]
@@ -135,7 +140,8 @@ async def websocket_handler(request):
             'data': {
                 'portColors': config.get('portColors', {}),
                 'localLat': config.get('localLat', 50.0),
-                'localLon': config.get('localLon', 10.0)
+                'localLon': config.get('localLon', 10.0),
+                'showClients': config.get('showClients', False)
             }
         })
 
@@ -169,7 +175,8 @@ async def api_config(request):
     return web.json_response({
         'portColors': config.get('portColors', {}),
         'localLat': config.get('localLat', 50.0),
-        'localLon': config.get('localLon', 10.0)
+        'localLon': config.get('localLon', 10.0),
+        'showClients': config.get('showClients', False)
     })
 
 
@@ -186,7 +193,8 @@ async def index_handler(request):
 # ---- Packet Flushing ----
 async def flush_packets():
     """Periodically send buffered packets to all connected WebSocket clients.
-    On high throughput, sample evenly to keep the browser responsive."""
+    SYN packets (new connections) are always sent; enrichment updates are
+    sampled if the total batch exceeds MAX_PER_FLUSH."""
     global packet_buffer
     while True:
         await asyncio.sleep(FLUSH_INTERVAL)
@@ -199,16 +207,33 @@ async def flush_packets():
         buf = packet_buffer
         packet_buffer = []
 
-        # If buffer exceeds MAX_PER_FLUSH, sample evenly across the batch
-        if len(buf) > MAX_PER_FLUSH:
-            step = len(buf) / MAX_PER_FLUSH
-            batch = []
-            idx = 0.0
-            while len(batch) < MAX_PER_FLUSH and int(idx) < len(buf):
-                batch.append(buf[int(idx)])
-                idx += step
+        # Separate new connections from enrichment updates so SYNs are never
+        # dropped by sampling when an enrichment burst floods the buffer.
+        new_pkts = []
+        update_pkts = []
+        for p in buf:
+            if p.get('update'):
+                update_pkts.append(p)
+            else:
+                new_pkts.append(p)
+
+        # Always include all new connection packets (SYN-only → low volume)
+        # Sample enrichment updates if over budget
+        remaining = MAX_PER_FLUSH - len(new_pkts)
+        if remaining <= 0:
+            # Extremely unlikely: more SYNs than MAX_PER_FLUSH
+            batch = new_pkts[:MAX_PER_FLUSH]
+        elif len(update_pkts) <= remaining:
+            batch = new_pkts + update_pkts
         else:
-            batch = buf
+            # Sample enrichment updates evenly
+            step = len(update_pkts) / remaining
+            sampled = []
+            idx = 0.0
+            while len(sampled) < remaining and int(idx) < len(update_pkts):
+                sampled.append(update_pkts[int(idx)])
+                idx += step
+            batch = new_pkts + sampled
 
         msg = json.dumps({'type': 'packets', 'data': batch})
         dead = set()
@@ -222,7 +247,7 @@ async def flush_packets():
 
 # ---- Capture Callback ----
 def on_packet(pkt):
-    """Called by TcpdumpCapture for each parsed packet"""
+    """Called by ConnectionTracker for each captured connection"""
     global packet_buffer
 
     remote_ip = pkt['remoteIP']
@@ -236,7 +261,9 @@ def on_packet(pkt):
     color = port_conf['color'] if port_conf else None
     port_label = port_conf['label'] if port_conf else None
 
-    packet_buffer.append({
+    # Include local client IP if showClients is enabled
+    local_ip = pkt.get('localIP')
+    entry = {
         'ip': mask_ip(remote_ip) if config.get('maskIPs', True) else remote_ip,
         'lat': geo['lat'],
         'lon': geo['lon'],
@@ -245,8 +272,19 @@ def on_packet(pkt):
         'port': service_port,
         'direction': pkt['direction'],
         'color': color,
-        'portLabel': port_label
-    })
+        'portLabel': port_label,
+        'bytes': pkt.get('bytes', 0)
+    }
+    if pkt.get('update'):
+        entry['update'] = True
+    if config.get('showClients', False) and local_ip:
+        entry['localIP'] = local_ip
+
+    packet_buffer.append(entry)
+
+    # Feed MQTT publisher (if active)
+    if mqtt_pub:
+        mqtt_pub.on_packet(entry)
 
     # Overflow protection
     if len(packet_buffer) > MAX_BUFFER:
@@ -273,7 +311,7 @@ def on_capture_error(err):
 # ---- Resolve Local Position ----
 def resolve_local_position():
     """Try to determine the firewall's geolocation from its public IP"""
-    for ip in config.get('captureIPs', []):
+    for ip in config.get('wanIPs', []):
         geo = geoip.resolve(ip)
         if geo and geo['lat'] and geo['lon']:
             config['localLat'] = geo['lat']
@@ -297,20 +335,48 @@ async def capture_watchdog():
 
 
 def start_capture():
-    """Start tcpdump capture"""
+    """Start the ConnectionTracker (SYN-only multi-interface capture)"""
     global capture
-    device = config.get('captureDevice', 'em0')
-    local_ips = config.get('captureIPs', [])
-    log.info('Starte Capture auf %s (lokale IPs: %s)', device, ', '.join(local_ips))
+    wan_devices = config.get('wanDevices', [])
+    lan_devices = config.get('lanDevices', [])
+    wan_ips = config.get('wanIPs', [])
+    lan_ips = config.get('lanIPs', [])
+    log.info('Starte ConnectionTracker (WAN: %s, LAN: %s)',
+             ', '.join(wan_devices) or '(keine)',
+             ', '.join(lan_devices) or '(keine)')
 
-    capture = TcpdumpCapture(
-        device=device,
-        local_ips=local_ips,
+    capture = ConnectionTracker(
+        wan_devices=wan_devices,
+        lan_devices=lan_devices,
+        wan_ips=wan_ips,
+        lan_ips=lan_ips,
         on_packet=on_packet,
         on_status=on_capture_status,
         on_error=on_capture_error
     )
     capture.start()
+
+
+def start_mqtt():
+    """Start MQTTPublisher if MQTT export is enabled in config."""
+    global mqtt_pub
+    if not config.get('mqttEnabled', False):
+        log.info('MQTT Export deaktiviert')
+        return
+    server = config.get('mqttServer', '')
+    if not server:
+        log.warning('MQTT aktiviert aber kein Server konfiguriert')
+        return
+    mqtt_pub = MQTTPublisher(
+        host=server,
+        port=config.get('mqttPort', 1883),
+        username=config.get('mqttUsername') or None,
+        password=config.get('mqttPassword') or None,
+        base_topic=config.get('mqttTopic', 'tcpgeo'),
+        interval=config.get('mqttInterval', 60),
+        mask_ips=config.get('maskIPs', True),
+    )
+    mqtt_pub.start()
 
 
 # ---- Static file handler ----
@@ -359,7 +425,7 @@ async def init_app():
 
 async def on_shutdown(app):
     """Cleanup on server shutdown"""
-    log.info('Fahre herunter...')
+    log.info('Fahre herunter... (PID %d)', os.getpid())
     # Cancel background tasks
     for task_name in ('flush_task', 'watchdog_task'):
         task = app.get(task_name)
@@ -379,6 +445,9 @@ async def on_shutdown(app):
     # Stop capture
     if capture:
         capture.stop()
+    # Stop MQTT publisher
+    if mqtt_pub:
+        mqtt_pub.stop()
     # Close GeoIP
     geoip.close()
 
@@ -394,8 +463,23 @@ def main():
         host = '127.0.0.1'
     port = config.get('listenPort', 3333)
 
+    # ── Absorb premature SIGTERM/SIGINT during startup ──
+    # On OPNsense, configd may send signals to the process group when the
+    # rc.d start script exits.  We absorb them here so the server doesn't
+    # die before aiohttp installs its own graceful-shutdown handlers.
+    _startup_signals = []
+
+    def _absorb_signal(signum, _frame):
+        name = signal.Signals(signum).name
+        _startup_signals.append(name)
+        log.warning('Signal %s während Startup empfangen (absorbiert, PID %d)',
+                     name, os.getpid())
+
+    prev_term = signal.signal(signal.SIGTERM, _absorb_signal)
+    prev_int  = signal.signal(signal.SIGINT,  _absorb_signal)
+
     log.info('==================================')
-    log.info('TCPGeo OPNsense Globe Server')
+    log.info('TCPGeo OPNsense Globe Server  (PID %d)', os.getpid())
     log.info('==================================')
 
     # SSL/TLS setup
@@ -424,7 +508,10 @@ def main():
     # Resolve local position
     resolve_local_position()
 
-    # Start capture
+    # Start MQTT publisher FIRST so it catches all packets from capture
+    start_mqtt()
+
+    # Start capture (may produce SYN burst immediately)
     start_capture()
 
     # Create app with shutdown hook
@@ -433,15 +520,32 @@ def main():
 
     log.info('Globe erreichbar auf %s://%s:%d', protocol, host, port)
 
-    # run_app handles SIGTERM/SIGINT gracefully on its own
-    web.run_app(
-        app,
-        host=host,
-        port=port,
-        ssl_context=ssl_context,
-        print=None,
-        handle_signals=True
-    )
+    if _startup_signals:
+        log.warning('%d Signal(e) während Startup absorbiert: %s',
+                     len(_startup_signals), ', '.join(_startup_signals))
+
+    # Restore default handlers briefly so aiohttp can install its own.
+    signal.signal(signal.SIGTERM, prev_term)
+    signal.signal(signal.SIGINT,  prev_int)
+
+    # run_app installs its own SIGTERM/SIGINT handlers for graceful shutdown
+    try:
+        web.run_app(
+            app,
+            host=host,
+            port=port,
+            ssl_context=ssl_context,
+            print=None,
+            handle_signals=True
+        )
+    except OSError as e:
+        log.error('Server konnte Port %d nicht binden: %s', port, e)
+        sys.exit(1)
+    except Exception as e:
+        log.error('Server-Fehler: %s', e, exc_info=True)
+        sys.exit(1)
+    finally:
+        log.info('Server-Prozess beendet (PID %d)', os.getpid())
 
 
 if __name__ == '__main__':

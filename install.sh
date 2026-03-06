@@ -166,6 +166,8 @@ cp "${SRC_DIR}/opnsense/scripts/tcpgeo/download_geoip.py" \
    /usr/local/opnsense/scripts/tcpgeo/
 cp "${SRC_DIR}/opnsense/scripts/tcpgeo/generate_config.py" \
    /usr/local/opnsense/scripts/tcpgeo/
+cp "${SRC_DIR}/opnsense/scripts/tcpgeo/mqtt_client.py" \
+   /usr/local/opnsense/scripts/tcpgeo/
 cp "${SRC_DIR}/opnsense/scripts/tcpgeo/reconfigure.sh" \
    /usr/local/opnsense/scripts/tcpgeo/
 cp "${SRC_DIR}/opnsense/scripts/tcpgeo/status.sh" \
@@ -261,12 +263,15 @@ fi
 cp "${SCRIPT_DIR}/uninstall.sh" /usr/local/opnsense/scripts/tcpgeo/uninstall.sh 2>/dev/null || true
 chmod 755 /usr/local/opnsense/scripts/tcpgeo/uninstall.sh 2>/dev/null || true
 
-# Security: Create sudoers rule for tcpdump (service runs as nobody)
-printf "  Erstelle sudoers-Regel f\u00fcr tcpdump...\n"
+# Security: Create sudoers rules for tcpdump + pfctl (service runs as nobody)
+printf "  Erstelle sudoers-Regeln für tcpdump und pfctl...\n"
 mkdir -p /usr/local/etc/sudoers.d
-echo "nobody ALL=(root) NOPASSWD: /usr/sbin/tcpdump" > /usr/local/etc/sudoers.d/tcpgeo
+cat > /usr/local/etc/sudoers.d/tcpgeo <<'EOF'
+nobody ALL=(root) NOPASSWD: /usr/sbin/tcpdump
+nobody ALL=(root) NOPASSWD: /sbin/pfctl
+EOF
 chmod 440 /usr/local/etc/sudoers.d/tcpgeo
-printf "  \033[0;32m\u2713 sudoers-Regel erstellt\033[0m\n"
+printf "  \033[0;32m✓ sudoers-Regeln erstellt\033[0m\n"
 
 # Fix permissions for service user (nobody)
 chown root:nobody /usr/local/etc/tcpgeo 2>/dev/null || true

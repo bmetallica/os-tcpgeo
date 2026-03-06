@@ -126,6 +126,29 @@ TCPGeo uses a unified **ConnectionTracker** that combines the best of all worlds
 3. **Byte-count enrichment** — a background thread polls `pfctl -ss -v` every 15 s, batching active IPs into a single call and parsing byte counters. The frontend uses these to scale arc thickness.
 4. **UDP dedup** — identical UDP flows (same src/dst/port) are suppressed for 30 s to avoid flooding from DNS bursts.
 
+### Collector (Nacherfassung / Enrichment-based Connection Recovery)
+
+Because TCPGeo relies on SYN packets to detect new connections, there are two edge cases where a connection is **already active** but its SYN was never seen:
+
+| Scenario | Cause |
+|----------|-------|
+| **Startup race** | Connections established in the first seconds before `tcpdump` is fully running |
+| **Pre-existing connections** | Long-lived connections that were opened before TCPGeo was installed or started |
+
+The **Collector** solves this automatically — no user action required:
+
+1. The MQTT publisher is started **before** the packet capture, ensuring no SYN is lost to a timing gap.
+2. When the periodic `pfctl -ss -v` enrichment cycle runs (every 15 s), it discovers state-table entries with byte counters for IPs that have no corresponding SYN record in the MQTT aggregation tables.
+3. For each such "orphaned" enrichment update, the Collector **creates a new MQTT aggregation entry** with `count: 1` and the enriched byte count. The connection is resolved (country, city, port) just like any SYN-triggered entry.
+4. Subsequent enrichment cycles update that entry normally (incrementing bytes).
+
+**Result:** MQTT statistics are complete even for connections that existed before capture started. The Collector adds at most one entry per active state-table flow — it cannot produce duplicates because the key (client + country + city + port) is checked before creation.
+
+**Impact on data:**
+- Connection counts may be **slightly understated** if multiple SYN-retransmits for the same flow were all missed (still counted as 1).
+- Byte counts are **accurate** because they come from `pfctl` regardless of SYN detection.
+- The Collector only fires during enrichment cycles, so the entry appears with a delay of up to one `ENRICH_INTERVAL` (default 15 s) after the connection was established.
+
 ### MQTT Export
 
 TCPGeo can periodically publish connection statistics to an MQTT broker. This enables long-term analytics, dashboards, and alerting without affecting globe performance.

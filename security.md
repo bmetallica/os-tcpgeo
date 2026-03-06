@@ -186,6 +186,34 @@ Das Plugin hat **zwei getrennte Zugangsebenen**:
 - Bei Bedarf kann der MQTT-Broker TLS auf Port 8883 anbieten — eine zukünftige Erweiterung könnte optionales TLS hinzufügen.
 - Der MQTT-Client ist Publish-only und verarbeitet keine eingehenden Nachrichten (außer CONNACK/PINGRESP). Die Angriffsfläche ist minimal.
 
+### 2.9 Collector (Nacherfassung) — Sicherheitsbewertung
+
+Der Collector erstellt neue MQTT-Aggregationseinträge aus `pfctl`-Enrichment-Daten, wenn der ursprüngliche SYN-Paket nicht erfasst wurde (Race Condition beim Start, vorbestehende Verbindungen).
+
+| Aspekt | Bewertung |
+|--------|-----------|
+| **Datenquelle** | `pfctl -ss -v` (Kernel State Table) — vertrauenswürdig, nicht manipulierbar aus Userspace |
+| **Eintragserzeugung** | Nur bei `is_update=True` und fehlendem Key in den Aggregationstabellen |
+| **Duplikat-Schutz** | Key-Check (client + country + city + port) vor Erzeugung — kein doppeltes Zählen |
+| **Count-Annahme** | Jeder Collector-Eintrag wird mit `count: 1` angelegt. Bei mehreren verpassten SYNs pro Flow wird die Verbindungsanzahl leicht unterschätzt (konservativ, kein Überzählen) |
+| **Byte-Genauigkeit** | Bytes stammen direkt aus `pfctl` — unabhängig von SYN-Erkennung korrekt |
+| **Richtungserkennung** | Wird aus dem Enrichment-Paket übernommen (outgoing/incoming). Korrekt, da `pfctl` die Richtung aus der State-Table liefert |
+| **Timing** | Collector-Einträge erscheinen mit bis zu einem `ENRICH_INTERVAL` (Default 15 s) Verzögerung |
+| **Ressourcen** | Kein zusätzlicher Netzwerk- oder CPU-Aufwand — nutzt bestehende Enrichment-Daten |
+| **Datenintegrität** | Keine Möglichkeit, über den Collector falsche Daten einzuschleusen — die Daten durchlaufen denselben GeoIP-Resolver und IP-Masking wie SYN-basierte Einträge |
+
+**Risikomatrix:**
+
+| Risiko | Schweregrad | Bewertung |
+|--------|-------------|-----------|
+| Collector erzeugt falsche Einträge | NIEDRIG | Ausgeschlossen — Datenquelle ist Kernel State Table (`pfctl`), nicht User-Input |
+| Duplikate verfälschen Statistiken | NIEDRIG | Key-basierte Deduplizierung verhindert Mehrfachanlage |
+| Collector wird als Amplification-Vektor missbraucht | KEINE | Kein externer Input — Enrichment läuft lokal, Daten fließen nur outbound zum MQTT-Broker |
+| Unterschätzung von Connection Counts | INFO | Design-Entscheidung: `count: 1` ist konservativ und akzeptabel, da Byte-Werte korrekt sind |
+| Race Condition zwischen Capture und MQTT | BEHOBEN | `start_mqtt()` wird vor `start_capture()` aufgerufen, sodass der Publisher bereit ist, bevor der erste SYN eintrifft |
+
+**Fazit:** Der Collector erhöht die Datenqualität der MQTT-Statistiken ohne zusätzliche Angriffsfläche. Die Implementierung ist konservativ (nur `count: 1`, Key-Deduplizierung) und nutzt ausschließlich vertrauenswürdige Kernel-Daten als Quelle.
+
 ---
 
 ## 3. Deployment-Anforderungen
@@ -505,6 +533,7 @@ Die Installation überschreibt alle Dateien. Konfigurationseinstellungen in `con
 - **0.0.0.0 Block:** ✅ Fallback auf 127.0.0.1
 - **Passwortvergleich:** ✅ hmac.compare_digest (timing-safe)
 - **Path-Traversal:** ✅ is_relative_to statt startswith
+- **Startreihenfolge:** ✅ `start_mqtt()` vor `start_capture()` — verhindert Race Condition bei SYN-Erfassung
 - **Restrisiko:** 🟡 Kein TLS (SEC-LOW-01), kein CSP (SEC-LOW-04)
 
 ### mqtt_client.py (300+ Zeilen)
@@ -515,6 +544,7 @@ Die Installation überschreibt alle Dateien. Konfigurationseinstellungen in `con
 - **Thread-Safety:** ✅ Socket-Operationen mit Lock geschützt
 - **Fehlerbehandlung:** ✅ Verbindungsfehler mit Reconnect + Logging (kein Crash)
 - **Daten:** ✅ IP-Masking wird auf MQTT-Payloads angewendet
+- **Collector:** ✅ Nacherfassung erstellt Einträge aus Enrichment-Daten mit Key-Deduplizierung (kein Überzählen)
 - **Restrisiko:** 🟡 MQTT-Traffic unverschlüsselt (kein TLS). Akzeptabel für LAN-Betrieb.
 
 ### capture.py (580 Zeilen)
